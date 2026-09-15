@@ -1,0 +1,36 @@
+# AI Runtime CLI workload spec — ModernBERT single-GPU fine-tuning on AG News.
+#
+# Run it with:
+#   air run --file air/finetune_singlegpu.yaml --watch --profile DEFAULT
+#
+# The referenced Python file (src/01_finetune_singlegpu.py) is the SAME file you can
+# open and Run All as a Databricks notebook — no code changes between the two modes.
+# Dependencies are declared here (not via %pip) so the shared script stays portable.
+
+experiment_name: modernbert-agnews-singlegpu
+max_retries: 0
+
+environment:
+  # Version "4" ships Python 3.12, torch 2.7.1+cu126, mlflow, scikit-learn and
+  # serverless_gpu preinstalled — we only add the missing NLP libraries. Versions are
+  # pinned to the 4.x transformers line: 5.x has breaking API changes, and unpinned
+  # datasets pulls pyarrow>=25 which conflicts with the preinstalled databricks-connect.
+  version: "4"
+  dependencies:
+    - "transformers>=4.48,<5"
+    - "datasets>=2.19,<4"
+    - "accelerate>=0.30,<2"
+    # AI Runtime presets HF_HUB_ENABLE_HF_TRANSFER=1, so this fast-download backend
+    # must be installed or Hub downloads (model/tokenizer/dataset) raise ValueError.
+    - "hf_transfer"
+
+compute:
+  num_accelerators: 1
+  accelerator_type: GPU_1xA10
+
+code_source:
+  type: snapshot
+  snapshot:
+    root_path: ..
+
+command: python $CODE_SOURCE_PATH/src/01_finetune_singlegpu.py

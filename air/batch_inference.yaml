@@ -1,0 +1,27 @@
+# AI Runtime CLI workload spec — ModernBERT GPU batch inference on AG News.
+#
+# Requires a model already registered to Unity Catalog by 01 or 02.
+# Run it with:
+#   air run --file air/batch_inference.yaml --watch --profile DEFAULT
+
+experiment_name: modernbert-agnews-batch-inference
+max_retries: 0
+
+environment:
+  # See finetune_singlegpu.yaml for why only these are declared and pinned to 4.x.
+  version: "4"
+  dependencies:
+    - "transformers>=4.48,<5"
+    - "datasets>=2.19,<4"
+    - "hf_transfer"
+
+compute:
+  num_accelerators: 1
+  accelerator_type: GPU_1xA10
+
+code_source:
+  type: snapshot
+  snapshot:
+    root_path: ..
+
+command: python $CODE_SOURCE_PATH/src/03_batch_inference.py

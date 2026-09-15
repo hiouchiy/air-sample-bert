@@ -1,0 +1,31 @@
+# AI Runtime CLI workload spec — ModernBERT multi-GPU (8×H100 DDP) fine-tuning on AG News.
+#
+# Run it with:
+#   air run --file air/finetune_multigpu.yaml --watch --profile DEFAULT
+#
+# The referenced file (src/02_finetune_multigpu.py) is the same file you can Run All as a
+# notebook. It requests 8 GPUs via the serverless_gpu @distributed decorator, so `compute`
+# below provisions the 8×H100 node.
+
+experiment_name: modernbert-agnews-multigpu
+max_retries: 0
+
+environment:
+  # See finetune_singlegpu.yaml for why only these three are declared and pinned to 4.x.
+  version: "4"
+  dependencies:
+    - "transformers>=4.48,<5"
+    - "datasets>=2.19,<4"
+    - "accelerate>=0.30,<2"
+    - "hf_transfer"
+
+compute:
+  num_accelerators: 8
+  accelerator_type: GPU_8xH100
+
+code_source:
+  type: snapshot
+  snapshot:
+    root_path: ..
+
+command: torchrun --standalone --nproc_per_node=gpu $CODE_SOURCE_PATH/src/02_finetune_multigpu.py
