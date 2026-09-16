@@ -1,7 +1,7 @@
 # AI Runtime CLI workload spec — ModernBERT multi-GPU (8×H100 DDP) fine-tuning on AG News.
 #
 # Run it with:
-#   air run --file air/finetune_multigpu.yaml --watch --profile DEFAULT
+#   air run --file air/finetune_multigpu.yaml --watch --profile <your-profile>
 #
 # The referenced file (src/02_finetune_multigpu.py) is the same file you can Run All as a
 # notebook. It requests 8 GPUs via the serverless_gpu @distributed decorator, so `compute`

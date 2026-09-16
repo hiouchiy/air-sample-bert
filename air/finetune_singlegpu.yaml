@@ -1,7 +1,7 @@
 # AI Runtime CLI workload spec — ModernBERT single-GPU fine-tuning on AG News.
 #
 # Run it with:
-#   air run --file air/finetune_singlegpu.yaml --watch --profile DEFAULT
+#   air run --file air/finetune_singlegpu.yaml --watch --profile <your-profile>
 #
 # The referenced Python file (src/01_finetune_singlegpu.py) is the SAME file you can
 # open and Run All as a Databricks notebook — no code changes between the two modes.
