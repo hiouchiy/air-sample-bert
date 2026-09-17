@@ -8,16 +8,21 @@
 # MAGIC
 # MAGIC ## Note on execution mode
 # MAGIC Unlike `01`–`03`, this is a **control-plane** step (it calls the Serving REST API), not a
-# MAGIC GPU training job. Run it as:
-# MAGIC 1. **A Databricks notebook** — open and *Run All* (uses the notebook's ambient auth), or
-# MAGIC 2. **Locally / in CI** — `DATABRICKS_CONFIG_PROFILE=DEFAULT python src/04_serve.py`.
+# MAGIC GPU training job — so it does **not** use the AI Runtime CLI. Run it either way:
+# MAGIC 1. **As a Databricks notebook** — open and *Run All* (the `%pip` cell installs `mlflow`; auth
+# MAGIC    is the notebook's own), **or**
+# MAGIC 2. **Locally / in CI** — install the dependency first, then run with your profile:
+# MAGIC    ```bash
+# MAGIC    pip install -r requirements.txt        # or: pip install "mlflow>=2.15.0"
+# MAGIC    DATABRICKS_CONFIG_PROFILE=<your-profile> python src/04_serve.py
+# MAGIC    ```
 # MAGIC
-# MAGIC It does **not** need the AI Runtime CLI, because it provisions a serving endpoint rather
-# MAGIC than running on a GPU node.
+# MAGIC It uses the MLflow **Deployments** client (`get_deploy_client("databricks")`), whose dict
+# MAGIC config is the stable REST shape — so it does not break across `databricks-sdk` versions.
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "databricks-sdk>=0.30.0" "mlflow>=2.15.0"
+# MAGIC %pip install -U "mlflow>=2.15.0"
 
 # COMMAND ----------
 
@@ -31,6 +36,7 @@
 # COMMAND ----------
 
 import os
+import time
 from dataclasses import dataclass
 
 
@@ -40,7 +46,7 @@ def _env(name: str, default: str) -> str:
 
 @dataclass
 class Config:
-    uc_catalog: str = _env("UC_CATALOG", "hiroshi")
+    uc_catalog: str = _env("UC_CATALOG", "main")
     uc_schema: str = _env("UC_SCHEMA", "air_samples")
     registered_model_name: str = _env("REGISTERED_MODEL_NAME", "modernbert_agnews")
     endpoint_name: str = _env("ENDPOINT_NAME", "modernbert-agnews")
@@ -65,11 +71,7 @@ print(CFG)
 # COMMAND ----------
 
 import mlflow
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import (
-    EndpointCoreConfigInput,
-    ServedEntityInput,
-)
+from mlflow.deployments import get_deploy_client
 
 
 def latest_version(cfg: Config) -> str:
@@ -83,31 +85,63 @@ def latest_version(cfg: Config) -> str:
     return str(max(int(v.version) for v in versions))
 
 
+def _served_config(cfg: Config, version: str) -> dict:
+    return {
+        "served_entities": [
+            {
+                "entity_name": cfg.uc_model_fqn,
+                "entity_version": version,
+                "workload_type": cfg.workload_type,
+                "workload_size": cfg.workload_size,
+                "scale_to_zero_enabled": cfg.scale_to_zero,
+            }
+        ],
+        "traffic_config": {
+            "routes": [
+                {"served_model_name": f"{cfg.registered_model_name}-{version}", "traffic_percentage": 100}
+            ]
+        },
+    }
+
+
+def _endpoint_exists(client, name: str) -> bool:
+    try:
+        client.get_endpoint(name)
+        return True
+    except Exception:
+        return False
+
+
+def _wait_ready(client, name: str, timeout_s: int = 2400):
+    """Poll until state.ready == READY and config_update == NOT_UPDATING."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        state = (client.get_endpoint(name) or {}).get("state", {})
+        ready, updating = state.get("ready"), state.get("config_update")
+        print(f"  endpoint state: ready={ready} config_update={updating}")
+        if ready == "READY" and updating in ("NOT_UPDATING", None):
+            return
+        time.sleep(30)
+    raise TimeoutError(f"Endpoint {name} not ready within {timeout_s}s")
+
+
 def deploy(cfg: Config):
-    w = WorkspaceClient()
+    client = get_deploy_client("databricks")
     version = cfg.model_version or latest_version(cfg)
-    print(f"Deploying {cfg.uc_model_fqn} v{version} to endpoint '{cfg.endpoint_name}'")
+    config = _served_config(cfg, version)
+    print(f"Deploying {cfg.uc_model_fqn} v{version} to endpoint '{cfg.endpoint_name}' "
+          f"(this provisions GPU serving and may take several minutes).")
 
-    served = ServedEntityInput(
-        entity_name=cfg.uc_model_fqn,
-        entity_version=version,
-        workload_type=cfg.workload_type,
-        workload_size=cfg.workload_size,
-        scale_to_zero_enabled=cfg.scale_to_zero,
-    )
-    config = EndpointCoreConfigInput(served_entities=[served])
-
-    existing = [e.name for e in w.serving_endpoints.list()]
-    if cfg.endpoint_name in existing:
-        print("Endpoint exists — updating served entity (this may take several minutes).")
-        w.serving_endpoints.update_config_and_wait(
-            name=cfg.endpoint_name, served_entities=[served]
-        )
+    if _endpoint_exists(client, cfg.endpoint_name):
+        print("Endpoint exists — updating served entity.")
+        client.update_endpoint(endpoint=cfg.endpoint_name, config=config)
     else:
-        print("Creating endpoint (this may take several minutes).")
-        w.serving_endpoints.create_and_wait(name=cfg.endpoint_name, config=config)
+        print("Creating endpoint.")
+        client.create_endpoint(name=cfg.endpoint_name, config=config)
+
+    _wait_ready(client, cfg.endpoint_name)
     print("Endpoint is ready.")
-    return w, version
+    return client, version
 
 # COMMAND ----------
 
@@ -116,16 +150,17 @@ def deploy(cfg: Config):
 
 # COMMAND ----------
 
-def query(w, cfg: Config):
+def query(client, cfg: Config):
     examples = [
         "The national team clinched the championship in overtime last night.",
         "The central bank raised interest rates to curb rising inflation.",
         "Researchers unveiled a new quantum chip that doubles qubit stability.",
     ]
-    response = w.serving_endpoints.query(name=cfg.endpoint_name, inputs=examples)
-    for text, pred in zip(examples, response.predictions):
+    response = client.predict(endpoint=cfg.endpoint_name, inputs={"inputs": examples})
+    predictions = response["predictions"] if isinstance(response, dict) else response.predictions
+    for text, pred in zip(examples, predictions):
         print(f"{pred} <- {text}")
-    return response.predictions
+    return predictions
 
 # COMMAND ----------
 
@@ -135,11 +170,9 @@ def query(w, cfg: Config):
 # COMMAND ----------
 
 def main():
-    w, version = deploy(CFG)
-    query(w, CFG)
-    print(
-        f"Done. Endpoint '{CFG.endpoint_name}' serving {CFG.uc_model_fqn} v{version}."
-    )
+    client, version = deploy(CFG)
+    query(client, CFG)
+    print(f"Done. Endpoint '{CFG.endpoint_name}' serving {CFG.uc_model_fqn} v{version}.")
 
 
 # COMMAND ----------

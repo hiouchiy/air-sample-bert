@@ -70,13 +70,13 @@ databricks volumes create $CATALOG air_samples predictions MANAGED --profile air
 
 ## Point the demo at your catalog
 
-The scripts default to catalog **`hiroshi`**, schema **`air_samples`** (the environment this was
-built in). **Set them to the `$CATALOG` you created above** in either of two ways:
+The scripts default to catalog **`main`**, schema **`air_samples`** — the same values the Setup
+step creates. **If you ran Setup with `CATALOG=main`, everything runs unchanged.** To use a
+different catalog, set `UC_CATALOG` either way:
 
-- **Easiest:** edit the two `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each
-  `src/*.py` (search for `UC_CATALOG`), or
-- **Per run:** prefix the YAML `command:` line, e.g.
-  `command: UC_CATALOG=main python $CODE_SOURCE_PATH/src/01_finetune_singlegpu.py`.
+- edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each `src/*.py`, or
+- prefix the YAML `command:` line, e.g.
+  `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/src/01_finetune_singlegpu.py`.
 
 Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
 
@@ -97,7 +97,9 @@ COPYFILE_DISABLE=1 air run --file air/finetune_multigpu.yaml --watch --profile a
 # 3) GPU batch inference over the AG News test set → UC table (or a CSV on the UC Volume)
 COPYFILE_DISABLE=1 air run --file air/batch_inference.yaml --watch --profile air
 
-# 4) Deploy a real-time GPU serving endpoint, then query it  (run locally; needs Model Serving)
+# 4) Deploy a real-time GPU serving endpoint, then query it.
+#    04 is a control-plane script (not a GPU job), so run it locally — install its one dependency first:
+pip install -r requirements.txt          # or: pip install "mlflow>=2.15.0"
 DATABRICKS_CONFIG_PROFILE=air python src/04_serve.py
 ```
 
@@ -111,11 +113,18 @@ Import any `src/*.py` into your Databricks workspace (**Workspace → Import →
 **AI Runtime**, and **Run All**. The `%pip` cells install dependencies automatically. Start with
 `01_finetune_singlegpu.py`, then `03_batch_inference.py`, then `04_serve.py`.
 
+- **`02_finetune_multigpu.py` must be attached to a `GPU_8xH100` AI Runtime compute** — not a
+  generic/A10 one. As a notebook it runs `serverless_gpu` in local mode, which requires the attached
+  GPU to match `gpu_type="H100"` (otherwise it raises `GPUTypeError`).
+- The **first** run of each notebook waits several minutes (~5 min on A10, ~7 min on 8×H100) for GPU
+  capacity before any cell executes — that's normal cold start, not a hang.
+- `04_serve.py` is control-plane and runs on any compute (its `%pip` cell installs `mlflow`).
+
 ## Configuration (env vars, with defaults)
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `UC_CATALOG` / `UC_SCHEMA` | `hiroshi` / `air_samples` | **Unity Catalog target — set to your catalog (see above)** |
+| `UC_CATALOG` / `UC_SCHEMA` | `main` / `air_samples` | Unity Catalog target (matches Setup; change only to use another catalog) |
 | `REGISTERED_MODEL_NAME` | `modernbert_agnews` | UC registered model name |
 | `MODEL_NAME` | `answerdotai/ModernBERT-base` | Base model to fine-tune |
 | `DATASET_NAME` | `fancyzhx/ag_news` | HuggingFace dataset |
@@ -132,6 +141,9 @@ Override any of these per run by prefixing the YAML `command:` line, e.g.
 | Job dies in seconds, `cd: .../._xxx: Not a directory` | macOS AppleDouble files in the snapshot — always run with `COPYFILE_DISABLE=1` (see above). |
 | `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
 | Job fails ~50s in with no logs | Usually a dependency-install issue — keep the pinned versions in the YAML; don't add heavy/unpinned packages. |
+| `04_serve.py` → `ModuleNotFoundError: No module named 'mlflow'` (local run) | Install deps first: `pip install -r requirements.txt`. (Not needed in notebook mode — the `%pip` cell handles it.) |
+| Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless if followed by `Wrote ... to UC Volume`. AI Runtime GPU nodes have no Spark, so 03 writes a CSV to the UC Volume. These lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore. |
+| `02` notebook → `GPUTypeError: ... does not match the requested GPU type H100` | Attach the `02` notebook to a **`GPU_8xH100`** AI Runtime compute (see notebook notes). |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
 | Step 3/4 can't find the model | Run step 1 first (it registers the model), then set the `@champion` alias or let step 3 fall back to the latest version. |
 | Long "waiting for GPU capacity" | Normal for H100; retry later or use the A10 steps. AI Runtime is US-region only for now. |
