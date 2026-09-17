@@ -252,7 +252,12 @@ def _train_impl():
             )
             log(f"logged model: {info.model_uri}")
             if cfg.register_model:
-                log(f"registered to UC: {cfg.uc_model_fqn}")
+                from mlflow.tracking import MlflowClient
+
+                v = info.registered_model_version
+                MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
+                    cfg.uc_model_fqn, "champion", v)
+                log(f"registered {cfg.uc_model_fqn} version {v} and set alias @champion")
 
     return metrics
 

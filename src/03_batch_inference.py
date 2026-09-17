@@ -2,10 +2,10 @@
 # MAGIC %md
 # MAGIC # ModernBERT — GPU batch inference on AI Runtime
 # MAGIC
-# MAGIC Loads the fine-tuned ModernBERT model that `01`/`02` registered to **Unity Catalog** and
-# MAGIC runs **GPU batch inference** over the AG News test set on an AI Runtime GPU. It reports
-# MAGIC accuracy and throughput, and writes the scored rows to a **Unity Catalog Delta table**
-# MAGIC (falling back to a CSV on a UC Volume if no Spark session is available).
+# MAGIC Loads the fine-tuned ModernBERT model that `01`/`02` registered to **Unity Catalog**
+# MAGIC (the `@champion` version) and runs **GPU batch inference** over the AG News test set on an
+# MAGIC AI Runtime GPU. It reports accuracy and throughput and writes the scored rows to a CSV on a
+# MAGIC **Unity Catalog Volume** (a plain file write — no Spark).
 # MAGIC
 # MAGIC ## Runs two ways, without code changes
 # MAGIC 1. **Notebook** — open and *Run All* on AI Runtime.
@@ -51,12 +51,11 @@ class Config:
     model_uri: str = _env("MODEL_URI", "")
 
     dataset_name: str = _env("DATASET_NAME", "fancyzhx/ag_news")
-    input_table: str = _env("INPUT_TABLE", "")          # optional UC table with a `text` column
     max_samples: int = int(_env("MAX_SAMPLES", "7600"))  # AG News test size
     batch_size: int = int(_env("BATCH_SIZE", "128"))
     max_length: int = int(_env("MAX_LENGTH", "256"))
 
-    output_table: str = _env("OUTPUT_TABLE", "modernbert_agnews_predictions")
+    output_name: str = _env("OUTPUT_NAME", "modernbert_agnews_predictions")
 
     @property
     def uc_model_fqn(self) -> str:
@@ -65,10 +64,6 @@ class Config:
     @property
     def resolved_model_uri(self) -> str:
         return self.model_uri or f"models:/{self.uc_model_fqn}@champion"
-
-    @property
-    def output_table_fqn(self) -> str:
-        return f"{self.uc_catalog}.{self.uc_schema}.{self.output_table}"
 
 
 CFG = Config()
@@ -114,14 +109,7 @@ def load_model(cfg: Config):
 # COMMAND ----------
 
 def load_inputs(cfg: Config):
-    """Return (texts, labels_or_None). Labels are present only for the AG News eval path."""
-    if cfg.input_table:
-        spark = get_spark()
-        if spark is None:
-            raise RuntimeError("INPUT_TABLE set but no Spark session is available.")
-        pdf = spark.table(cfg.input_table).limit(cfg.max_samples).toPandas()
-        return pdf["text"].tolist(), None
-
+    """Return (texts, labels). Scores the AG News test split."""
     from datasets import load_dataset
 
     ds = load_dataset(cfg.dataset_name)["test"]
@@ -155,26 +143,10 @@ def run_inference(cfg: Config, clf, texts):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Persist predictions to Unity Catalog (with graceful fallback)
+# MAGIC ## 6. Write predictions to a Unity Catalog Volume
+# MAGIC A plain file write to the UC Volume — no Spark involved.
 
 # COMMAND ----------
-
-def get_spark():
-    """Return an ALREADY-ACTIVE Spark session, or None.
-
-    On a normal Databricks cluster/serverless notebook a `spark` session is pre-created and we
-    reuse it. On AI Runtime GPU nodes there is no Spark, so we return None and the caller writes a
-    UC Volume CSV instead. We deliberately do NOT call `SparkSession.builder.getOrCreate()`: on a
-    GPU node that spawns the `spark-class` launcher, which prints alarming (but harmless) stderr
-    before failing. Returning None keeps the logs clean.
-    """
-    try:
-        from pyspark.sql import SparkSession
-
-        return SparkSession.getActiveSession()
-    except Exception:
-        return None
-
 
 def persist(cfg: Config, texts, preds, labels):
     import pandas as pd
@@ -188,20 +160,9 @@ def persist(cfg: Config, texts, preds, labels):
         rows["true_label"] = [LABELS[i] for i in labels]
     pdf = pd.DataFrame(rows)
 
-    spark = get_spark()
-    if spark is not None:
-        try:
-            spark.createDataFrame(pdf).write.mode("overwrite").saveAsTable(cfg.output_table_fqn)
-            print(f"Wrote {len(pdf)} predictions to UC table {cfg.output_table_fqn}")
-            return cfg.output_table_fqn
-        except Exception as exc:
-            print(f"Spark write failed ({exc}); falling back to a UC Volume CSV.")
-
-    # Fallback when no Spark session is available (AI Runtime GPU nodes have no Spark):
-    # write the scored rows to a UC Volume instead of a Delta table.
     out_dir = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
     os.makedirs(out_dir, exist_ok=True)
-    path = f"{out_dir}/{cfg.output_table}.csv"
+    path = f"{out_dir}/{cfg.output_name}.csv"
     pdf.to_csv(path, index=False)
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")
     return path

@@ -18,6 +18,19 @@ batch inference**, and deploys a **Model Serving** endpoint.
 | 3. GPU batch inference | [`src/03_batch_inference.py`](src/03_batch_inference.py) | `GPU_1xA10` | Loading the UC model, batched GPU scoring, writing to UC |
 | 4. Model Serving | [`src/04_serve.py`](src/04_serve.py) | Serving (GPU) | Real-time endpoint from the registered model |
 
+## What lands in the Databricks platform (in both modes)
+
+Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks platform:
+
+- **MLflow experiment tracking** — 01/02/03 log params, metrics and the model to an MLflow run
+  (02 logs each config as its own run). View them in the workspace **Experiments** UI.
+- **Unity Catalog Model Registry + versioning** — 01/02 register the model to
+  `main.air_samples.modernbert_agnews`, creating a new **version** each run and promoting it to the
+  **`@champion`** alias. 03 (batch inference) and 04 (serving) load `@champion`, so version
+  promotion is explicit and governed — no manual step.
+- **Unity Catalog Volumes** — 03 writes its prediction file to a UC Volume; 04 serves the registered
+  model as a **Model Serving** endpoint.
+
 ## Every script runs two ways, with no code changes
 
 This is a hard requirement for these samples:
