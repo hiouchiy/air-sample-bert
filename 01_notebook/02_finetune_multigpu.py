@@ -15,12 +15,14 @@
 # MAGIC corpus in a fraction of the wall-clock time. (Model-parallel / FSDP / DeepSpeed are only
 # MAGIC needed when a model does not fit on one GPU — not the case for BERT-class encoders.)
 # MAGIC
-# MAGIC ## Runs two ways, without code changes
-# MAGIC 1. **Notebook** — open in the workspace and *Run All* (must be attached to AI Runtime).
-# MAGIC 2. **AI Runtime CLI** — `air run --file air/finetune_multigpu.yaml --watch`.
+# MAGIC ## How to run this notebook
+# MAGIC Import it into the workspace, **attach it to a `GPU_8xH100` AI Runtime compute** (the
+# MAGIC `@distributed` decorator runs in local mode and requires the attached GPU type to match
+# MAGIC `gpu_type="H100"`), and **Run All**. The entry point calls `run_train.distributed()`, which
+# MAGIC `serverless_gpu` fans out across the node's 8 GPUs (one process per GPU).
 # MAGIC
-# MAGIC In both modes the entry point calls `run_train.distributed()`, which the `serverless_gpu`
-# MAGIC runtime fans out across the 8 GPUs.
+# MAGIC > The CLI equivalent (`02_cli/02_finetune_multigpu.py`, launched with `torchrun`) trains the
+# MAGIC > same model; see that folder to submit it as an AI Runtime CLI job.
 
 # COMMAND ----------
 
@@ -101,10 +103,9 @@ LABEL2ID = {l: i for i, l in enumerate(LABELS)}
 # MAGIC %md
 # MAGIC ## 3. The distributed training function
 # MAGIC Everything the workers need lives **inside** `_train_impl()` — imports, data loading, model
-# MAGIC init and the training loop — so it is self-contained whether it is shipped to GPU workers by
-# MAGIC `serverless_gpu` (notebook) or launched per-GPU by `torchrun` (CLI). Hugging Face `Trainer`
-# MAGIC reads the `torch.distributed` env vars (`RANK`, `WORLD_SIZE`, `LOCAL_RANK`, ...) and runs DDP;
-# MAGIC we only log/register from rank 0. See section 4 for how the two launch modes are dispatched.
+# MAGIC init and the training loop — because `serverless_gpu` ships this function to each GPU worker
+# MAGIC process. Hugging Face `Trainer` reads the `torch.distributed` env vars (`RANK`, `WORLD_SIZE`,
+# MAGIC `LOCAL_RANK`, ...) that `@distributed` sets and runs DDP; we only log/register from rank 0.
 
 # COMMAND ----------
 
@@ -268,27 +269,11 @@ run_train = distributed(gpus=CFG.num_gpus, gpu_type=CFG.gpu_type)(_train_impl)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Entry point — one file, two launch modes (no code changes)
-# MAGIC The **same file** launches multi-GPU DDP two ways:
-# MAGIC - **Notebook** (*Run All*): no `torchrun` env is present, so we call
-# MAGIC   `run_train.distributed()` and `serverless_gpu` fans the work out across the GPUs.
-# MAGIC - **AI Runtime CLI**: the workload YAML runs the file under `torchrun`, which sets `RANK`
-# MAGIC   and starts one process per GPU; each process runs `_train_impl()` directly. (`air run`
-# MAGIC   provisions the node and injects the rendezvous env vars; `torchrun` reads them.)
+# MAGIC ## 4. Launch the distributed training
+# MAGIC `run_train.distributed()` fans `_train_impl` out across all `num_gpus` GPUs of the attached
+# MAGIC node (one process per GPU) and runs PyTorch DDP. Each call also creates an MLflow run.
 
 # COMMAND ----------
 
-def main():
-    if os.environ.get("RANK") is not None and os.environ.get("WORLD_SIZE") is not None:
-        # Already inside a torchrun-managed rank (AI Runtime CLI path).
-        return _train_impl()
-    # Notebook path: self-launch across GPUs.
-    result = run_train.distributed()
-    print("Distributed training finished.")
-    return result
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+result = run_train.distributed()
+print("Distributed training finished.")

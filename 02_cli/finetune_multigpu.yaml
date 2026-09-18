@@ -28,4 +28,4 @@ code_source:
   snapshot:
     root_path: ..
 
-command: torchrun --standalone --nproc_per_node=gpu $CODE_SOURCE_PATH/src/02_finetune_multigpu.py
+command: torchrun --standalone --nproc_per_node=gpu $CODE_SOURCE_PATH/02_cli/02_finetune_multigpu.py

@@ -37,40 +37,38 @@ full replica (PyTorch **DDP**), with the global batch split across them. This is
 pattern for BERT-class training. FSDP/DeepSpeed only earn their complexity when a model does not fit
 on one GPU.
 
-### Two launch modes for the same file (`02_finetune_multigpu.py`)
+### Two launch modes for multi-GPU (`02_finetune_multigpu.py`)
 
-Multi-GPU has two different launch mechanisms on AI Runtime, and the file supports both with **no
-code changes** by detecting `torchrun`'s `RANK`/`WORLD_SIZE` env vars in `main()`:
+Multi-GPU has two different launch mechanisms on AI Runtime, and the repo ships a file tuned to each
+(`01_notebook/` vs `02_cli/`):
 
-- **Notebook** (*Run All*): no `torchrun` env → the file calls `run_train.distributed()`, and
-  `serverless_gpu`'s `@distributed` decorator fans `_train_impl` out across the node's GPUs. This is
-  the notebook-native API and is single-node (≤ 8 GPUs).
-- **AI Runtime CLI**: the workload YAML runs the file under `torchrun`
-  (`command: torchrun --standalone --nproc_per_node=gpu $CODE_SOURCE_PATH/src/02_finetune_multigpu.py`).
-  `air run` provisions the node and injects rendezvous env vars; `torchrun` starts one process per
-  GPU and each runs `_train_impl()` directly. Hugging Face `Trainer` reads the env and does DDP.
-  (`run_train.distributed()` does **not** work under the CLI — it errors with "cluster_id is
-  required" — which is why the CLI path uses `torchrun` instead.)
+- **Notebook** (`01_notebook/02_finetune_multigpu.py`, *Run All*): calls `run_train.distributed()`,
+  and `serverless_gpu`'s `@distributed` decorator fans `_train_impl` out across the node's GPUs. This
+  is the notebook-native API and is single-node (≤ 8 GPUs). Attach to a **`GPU_8xH100`** compute.
+- **AI Runtime CLI** (`02_cli/02_finetune_multigpu.py`): the workload YAML runs the file under
+  `torchrun` (`command: torchrun --standalone --nproc_per_node=gpu
+  $CODE_SOURCE_PATH/02_cli/02_finetune_multigpu.py`). `air run` provisions the node and injects
+  rendezvous env vars; `torchrun` starts one process per GPU and each runs `_train_impl()` directly.
+  Hugging Face `Trainer` reads the env and does DDP. (`run_train.distributed()` does **not** work
+  under the CLI — it errors with "cluster_id is required" — which is why the CLI file uses `torchrun`.)
 
 For true **multi-node** (e.g. 16× H100 = 2 nodes) the CLI is the only option: set
 `num_accelerators: 16`, and use the injected `--nnodes=$NUM_NODES --node_rank=$NODE_RANK
 --nproc_per_node=$LOCAL_WORLD_SIZE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT` form of
 the `torchrun` command.
 
-## Notebook + CLI dual-mode (no code changes)
+## Notebook and CLI forms
 
-Each `src/*.py` carries Databricks notebook markers that are also valid Python comments:
+Each step exists as two files that share the same logic:
 
-- `# Databricks notebook source` — identifies the file as an importable notebook.
-- `# COMMAND ----------` — cell separators.
-- `# MAGIC %pip ...` / `# MAGIC %md ...` — notebook-only magic cells (install deps, render docs).
+- **`01_notebook/*.py`** — Databricks notebook source. It carries `# Databricks notebook source`,
+  `# COMMAND ----------` cell separators, and `# MAGIC %pip`/`%md` cells. Imported into the
+  workspace these become real cells (the `%pip` cells install dependencies) and *Run All* executes it.
+- **`02_cli/*.py`** — the same logic as a plain Python script (notebook markers stripped), submitted
+  with `air run`; dependencies come from the workload YAML (`environment.dependencies`) instead of
+  `%pip`. Each pairs with a `02_cli/*.yaml` workload spec.
 
-When the file is **imported into the workspace**, these become real cells (the `%pip` cells install
-dependencies). When it is **run by the AI Runtime CLI** (`python …`), the `# MAGIC` lines are inert
-comments and dependencies come from the workload YAML instead. A single
-`if __name__ == "__main__": main()` triggers execution in both (Databricks notebooks expose
-`__name__ == "__main__"`). All parameters are environment variables with defaults, so nothing needs
-editing between modes.
+All parameters are environment variables with defaults, so neither form needs editing to run.
 
 ## AI Runtime operational notes (validated on this workspace)
 
@@ -100,7 +98,9 @@ These are the non-obvious things that make the samples run reliably on AI Runtim
 
 | File | Role |
 |------|------|
-| `src/01_finetune_singlegpu.py` + `air/finetune_singlegpu.yaml` | Single-GPU (A10) fine-tune → MLflow → UC |
-| `src/02_finetune_multigpu.py` + `air/finetune_multigpu.yaml` | 8×H100 DDP fine-tune |
-| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference → predictions CSV on a UC Volume |
-| `src/04_serve.py` | Deploy/query a Model Serving endpoint (control-plane) |
+| `01_finetune_singlegpu.py` (+ `02_cli/finetune_singlegpu.yaml`) | Single-GPU (A10) fine-tune → MLflow → UC |
+| `02_finetune_multigpu.py` (+ `02_cli/finetune_multigpu.yaml`) | 8×H100 DDP fine-tune |
+| `03_batch_inference.py` (+ `02_cli/batch_inference.yaml`) | GPU batch inference → predictions CSV on a UC Volume |
+| `04_serve.py` | Deploy/query a Model Serving endpoint (control-plane) |
+
+Each of the above exists in both `01_notebook/` (Run All) and `02_cli/` (`air run`) form.

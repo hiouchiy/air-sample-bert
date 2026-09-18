@@ -33,4 +33,4 @@ code_source:
   snapshot:
     root_path: ..
 
-command: python $CODE_SOURCE_PATH/src/01_finetune_singlegpu.py
+command: python $CODE_SOURCE_PATH/02_cli/01_finetune_singlegpu.py
