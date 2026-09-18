@@ -14,7 +14,7 @@
 # MAGIC 2. **Locally / in CI** — install the dependency first, then run with your profile:
 # MAGIC    ```bash
 # MAGIC    pip install -r requirements.txt        # or: pip install "mlflow>=2.15.0"
-# MAGIC    DATABRICKS_CONFIG_PROFILE=<your-profile> python src/04_serve.py
+# MAGIC    DATABRICKS_CONFIG_PROFILE=<your-profile> python 02_cli/04_serve.py
 # MAGIC    ```
 # MAGIC
 # MAGIC It uses the MLflow **Deployments** client (`get_deploy_client("databricks")`), whose dict

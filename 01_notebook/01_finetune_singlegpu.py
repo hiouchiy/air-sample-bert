@@ -14,15 +14,14 @@
 # MAGIC context window, and training on a large English + code corpus. It is a drop-in, more
 # MAGIC efficient replacement for classic BERT / RoBERTa for classification, retrieval and reranking.
 # MAGIC
-# MAGIC ## This notebook runs two ways, **without any code changes**
-# MAGIC 1. **As a Databricks notebook** — open it in the workspace and *Run All*. The
-# MAGIC    `# MAGIC %pip` cells below install dependencies in the notebook only.
-# MAGIC 2. **As an AI Runtime CLI job** — `air run --file air/finetune_singlegpu.yaml`.
-# MAGIC    The `# MAGIC` lines are plain Python comments and are ignored; dependencies come
-# MAGIC    from the YAML `environment.dependencies` instead.
+# MAGIC ## How to run this notebook
+# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (a single-GPU
+# MAGIC `GPU_1xA10` is enough), and **Run All**. The `# MAGIC %pip` cells below install the
+# MAGIC dependencies. All behaviour is controlled by environment variables (see the `Config` cell).
 # MAGIC
-# MAGIC All behaviour is controlled by environment variables (see the `Config` cell), so the
-# MAGIC exact same file is portable across both execution modes.
+# MAGIC > Prefer submitting from a terminal? The CLI equivalent is
+# MAGIC > `02_cli/01_finetune_singlegpu.py` — run it with
+# MAGIC > `air run --file 02_cli/finetune_singlegpu.yaml` (dependencies come from that YAML).
 
 # COMMAND ----------
 
@@ -43,10 +42,9 @@
 
 # MAGIC %md
 # MAGIC ## 2. Configuration
-# MAGIC Every knob is an environment variable with a sensible default, so the notebook and the
-# MAGIC CLI job behave identically. Override any value from the CLI with, e.g.
-# MAGIC `air run --file air/finetune_singlegpu.yaml --override 'command=EPOCHS=3 python ...'`
-# MAGIC or by editing `environment` variables in the YAML.
+# MAGIC Every knob is an environment variable with a sensible default. In the notebook you can set
+# MAGIC one before running, e.g. `import os; os.environ["EPOCHS"] = "3"`. (The CLI form sets them in
+# MAGIC the workload YAML — see `02_cli/finetune_singlegpu.yaml`.)
 
 # COMMAND ----------
 
