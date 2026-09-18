@@ -107,7 +107,7 @@ COPYFILE_DISABLE=1 air run --file air/finetune_singlegpu.yaml --watch --profile 
 # 2) (Optional) Fine-tune across 8× H100 with DDP  (larger GPU request; may wait for capacity)
 COPYFILE_DISABLE=1 air run --file air/finetune_multigpu.yaml --watch --profile air
 
-# 3) GPU batch inference over the AG News test set → UC table (or a CSV on the UC Volume)
+# 3) GPU batch inference over the AG News test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file air/batch_inference.yaml --watch --profile air
 
 # 4) Deploy a real-time GPU serving endpoint, then query it.
@@ -158,7 +158,7 @@ Override any of these per run by prefixing the YAML `command:` line, e.g.
 | Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless if followed by `Wrote ... to UC Volume`. AI Runtime GPU nodes have no Spark, so 03 writes a CSV to the UC Volume. These lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore. |
 | `02` notebook → `GPUTypeError: ... does not match the requested GPU type H100` | Attach the `02` notebook to a **`GPU_8xH100`** AI Runtime compute (see notebook notes). |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
-| Step 3/4 can't find the model | Run step 1 first (it registers the model), then set the `@champion` alias or let step 3 fall back to the latest version. |
+| Step 3/4 can't find the model | Run step 1 (or 2) first — it registers the model and sets the `@champion` alias that 03/04 load. |
 | Long "waiting for GPU capacity" | Normal for H100; retry later or use the A10 steps. AI Runtime is US-region only for now. |
 
 ## Repo layout

@@ -15,10 +15,10 @@
                     └────────┼──────────────────────────────────────┘
                              ▼
               Unity Catalog registered model
-              hiroshi.air_samples.modernbert_agnews
+              main.air_samples.modernbert_agnews  (promoted to @champion)
                      │                                  │
        03 batch inference (AIR GPU)         04 Model Serving (GPU endpoint)
-       → UC Delta predictions table         → real-time topic classification
+       → predictions CSV on a UC Volume     → real-time topic classification
 ```
 
 ## Model & data
@@ -102,5 +102,5 @@ These are the non-obvious things that make the samples run reliably on AI Runtim
 |------|------|
 | `src/01_finetune_singlegpu.py` + `air/finetune_singlegpu.yaml` | Single-GPU (A10) fine-tune → MLflow → UC |
 | `src/02_finetune_multigpu.py` + `air/finetune_multigpu.yaml` | 8×H100 DDP fine-tune |
-| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference → UC Delta table |
+| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference → predictions CSV on a UC Volume |
 | `src/04_serve.py` | Deploy/query a Model Serving endpoint (control-plane) |
