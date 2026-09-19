@@ -70,7 +70,7 @@ Each step exists as two files that share the same logic:
 
 All parameters are environment variables with defaults, so neither form needs editing to run.
 
-## AI Runtime operational notes (validated on this workspace)
+## AI Runtime operational notes
 
 These are the non-obvious things that make the samples run reliably on AI Runtime:
 
@@ -82,13 +82,13 @@ These are the non-obvious things that make the samples run reliably on AI Runtim
    `databricks-connect` and makes the YAML environment build fail).
 3. **Install `hf_transfer`.** AI Runtime presets `HF_HUB_ENABLE_HF_TRANSFER=1`; without the package,
    every HuggingFace Hub download raises `ValueError`.
-4. **Model logging/registration needs egress to the MLflow artifact store.** On this workspace
-   (`e2-demo-field-eng`) AI Runtime GPU compute can reach the default artifact store, so the
-   standard `mlflow.transformers.log_model(..., registered_model_name=...)` writes and registers to
-   Unity Catalog directly. **Workspaces with stricter egress may block that host**
+4. **Model logging/registration needs egress to the MLflow artifact store.** On a workspace where
+   AI Runtime GPU compute can reach the default artifact store, the standard
+   `mlflow.transformers.log_model(..., registered_model_name=...)` writes and registers to Unity
+   Catalog directly. **Workspaces with stricter egress may block that host**
    (`*.storage.cloud.databricks.com`); there, save the model to a UC Volume with
    `mlflow.transformers.save_model` and register from a control-plane context that can reach the
-   store. Validate on the target workspace before a customer demo.
+   store. Validate on your target workspace first.
 5. **macOS submitters:** prefix `air run` with `COPYFILE_DISABLE=1` to keep AppleDouble `._*` files
    out of the code snapshot tarball.
 6. **`air logs` may report "No logs available" even for successful runs.** Rely on MLflow
