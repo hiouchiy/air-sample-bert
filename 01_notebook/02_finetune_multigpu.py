@@ -15,11 +15,18 @@
 # MAGIC corpus in a fraction of the wall-clock time. (Model-parallel / FSDP / DeepSpeed are only
 # MAGIC needed when a model does not fit on one GPU — not the case for BERT-class encoders.)
 # MAGIC
-# MAGIC ## How to run this notebook
-# MAGIC Import it into the workspace, **attach it to a `GPU_8xH100` AI Runtime compute** (the
-# MAGIC `@distributed` decorator runs in local mode and requires the attached GPU type to match
-# MAGIC `gpu_type="H100"`), and **Run All**. The entry point calls `run_train.distributed()`, which
-# MAGIC `serverless_gpu` fans out across the node's 8 GPUs (one process per GPU).
+# MAGIC ## ▶ Before you Run All — attach a serverless 8×H100 GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
+# MAGIC **`GPU_8xH100`** node (the `@distributed` decorator runs in local mode and requires the
+# MAGIC attached GPU type to match `gpu_type="H100"`). Attach one from the notebook itself:
+# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
+# MAGIC 3. Set **Accelerator** to **8xH100** (`GPU_8xH100`); leave the default **Base environment**.
+# MAGIC 4. Click **Apply**, then **Confirm**.
+# MAGIC
+# MAGIC Then **Run All** — the final cell calls `run_train.distributed()`, which `serverless_gpu` fans
+# MAGIC out across the node's 8 GPUs (one process per GPU).
+# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > The CLI equivalent (`02_cli/02_finetune_multigpu.py`, launched with `torchrun`) trains the
 # MAGIC > same model; see that folder to submit it as an AI Runtime CLI job.
@@ -27,8 +34,9 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install dependencies (notebook only)
-# MAGIC Ignored under the AI Runtime CLI, where dependencies come from the workload YAML.
+# MAGIC ## 1. Install dependencies
+# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
+# MAGIC gets them from its workload YAML instead.)
 
 # COMMAND ----------
 
@@ -69,6 +77,9 @@ class Config:
     max_train_samples: int = int(_env("MAX_TRAIN_SAMPLES", "-1"))
     max_eval_samples: int = int(_env("MAX_EVAL_SAMPLES", "-1"))
 
+    # Attention backend: "sdpa" (default) or "flash_attention_2" (see §3).
+    attn_implementation: str = _env("ATTN_IMPLEMENTATION", "sdpa")
+
     # Training hyper-parameters -----------------------------------------
     epochs: float = float(_env("EPOCHS", "2"))
     train_batch_size: int = int(_env("TRAIN_BATCH_SIZE", "64"))  # per-device
@@ -106,6 +117,11 @@ LABEL2ID = {l: i for i, l in enumerate(LABELS)}
 # MAGIC init and the training loop — because `serverless_gpu` ships this function to each GPU worker
 # MAGIC process. Hugging Face `Trainer` reads the `torch.distributed` env vars (`RANK`, `WORLD_SIZE`,
 # MAGIC `LOCAL_RANK`, ...) that `@distributed` sets and runs DDP; we only log/register from rank 0.
+# MAGIC
+# MAGIC The attention backend defaults to **PyTorch SDPA** (built in, runs anywhere). To use
+# MAGIC **Flash Attention 2** (faster on H100, but it compiles a CUDA extension to match your exact
+# MAGIC PyTorch/CUDA/GPU and can be slow to install), add `flash-attn` to the deps and set
+# MAGIC `ATTN_IMPLEMENTATION=flash_attention_2`.
 
 # COMMAND ----------
 
@@ -159,20 +175,13 @@ def _train_impl():
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     # --- Model --------------------------------------------------------
-    try:
-        import flash_attn  # noqa: F401
-
-        attn = "flash_attention_2"
-    except Exception:
-        attn = "sdpa"
-    log(f"attn_implementation={attn}")
-
+    log(f"attn_implementation={cfg.attn_implementation}")
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg.model_name,
         num_labels=len(LABELS),
         id2label=ID2LABEL,
         label2id=LABEL2ID,
-        attn_implementation=attn,
+        attn_implementation=cfg.attn_implementation,
     )
 
     def compute_metrics(eval_pred):

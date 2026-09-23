@@ -13,22 +13,30 @@
 # MAGIC embeddings, alternating local/global attention, Flash Attention 2 support, an 8192-token
 # MAGIC context window, and training on a large English + code corpus. It is a drop-in, more
 # MAGIC efficient replacement for classic BERT / RoBERTa for classification, retrieval and reranking.
-# MAGIC
-# MAGIC ## How to run this notebook
-# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (a single-GPU
-# MAGIC `GPU_1xA10` is enough), and **Run All**. The `# MAGIC %pip` cells below install the
-# MAGIC dependencies. All behaviour is controlled by environment variables (see the `Config` cell).
-# MAGIC
-# MAGIC > Prefer submitting from a terminal? The CLI equivalent is
-# MAGIC > `02_cli/01_finetune_singlegpu.py` — run it with
-# MAGIC > `air run --file 02_cli/finetune_singlegpu.yaml` (dependencies come from that YAML).
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install dependencies (notebook only)
-# MAGIC These `%pip`/`%restart_python` magics run **only** when the file is opened as a
-# MAGIC notebook. Under the AI Runtime CLI the dependencies are declared in the workload YAML.
+# MAGIC ## ▶ Before you Run All — attach a serverless GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
+# MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
+# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
+# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
+# MAGIC 4. Click **Apply**, then **Confirm**.
+# MAGIC
+# MAGIC Then **Run All** — the steps below execute top to bottom and show their output as you go.
+# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
+# MAGIC
+# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/01_finetune_singlegpu.py`
+# MAGIC > — run it with `air run --file 02_cli/finetune_singlegpu.yaml`.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1. Install dependencies
+# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
+# MAGIC gets them from its workload YAML instead.)
 
 # COMMAND ----------
 
@@ -67,6 +75,9 @@ class Config:
     max_train_samples: int = int(_env("MAX_TRAIN_SAMPLES", "20000"))
     max_eval_samples: int = int(_env("MAX_EVAL_SAMPLES", "2000"))
 
+    # Attention backend: "sdpa" (default) or "flash_attention_2" (see the Train section).
+    attn_implementation: str = _env("ATTN_IMPLEMENTATION", "sdpa")
+
     # Training hyper-parameters -------------------------------------------
     epochs: float = float(_env("EPOCHS", "1"))
     train_batch_size: int = int(_env("TRAIN_BATCH_SIZE", "32"))
@@ -102,8 +113,7 @@ LABEL2ID = {l: i for i, l in enumerate(LABELS)}
 
 # MAGIC %md
 # MAGIC ## 3. Load & tokenize the dataset
-# MAGIC AG News ships with `datasets`; no Spark or Unity Catalog table is required, which keeps
-# MAGIC the example fully reproducible on any AI Runtime GPU.
+# MAGIC AG News is a public dataset that ships with the `datasets` library.
 
 # COMMAND ----------
 
@@ -136,10 +146,17 @@ def load_and_tokenize(cfg: Config):
     tokenized = ds.map(tokenize, batched=True, remove_columns=["text"])
     return tokenized, tokenizer
 
+
+# Run it: download AG News, sub-sample, and tokenize.
+tokenized, tokenizer = load_and_tokenize(CFG)
+print(tokenized)
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Metrics
+# MAGIC Compute accuracy and **macro-F1** (averages the four classes equally, so a weak class can't
+# MAGIC hide behind the majority ones).
 
 # COMMAND ----------
 
@@ -158,9 +175,15 @@ def compute_metrics(eval_pred):
 
 # MAGIC %md
 # MAGIC ## 5. Train
-# MAGIC We select the best available attention implementation. Flash Attention 2 is fastest on
-# MAGIC A10/H100 but has known numerical-stability edge cases with some `flash-attn` builds, so we
-# MAGIC fall back to PyTorch SDPA if it is not importable. This keeps the demo robust.
+# MAGIC ModernBERT supports two attention backends:
+# MAGIC - **PyTorch SDPA** (`sdpa`) — built into PyTorch, no extra install, runs anywhere. **Default in this sample.**
+# MAGIC - **Flash Attention 2** (`flash_attention_2`) — faster / more memory-efficient on A10/H100, but it
+# MAGIC   ships as a CUDA extension that must be **compiled to match your exact PyTorch + CUDA + GPU
+# MAGIC   architecture**; a matching prebuilt wheel often isn't available, so install can take many
+# MAGIC   minutes or fail.
+# MAGIC
+# MAGIC To use FA2: `%pip install flash-attn --no-build-isolation` and set
+# MAGIC `ATTN_IMPLEMENTATION=flash_attention_2` (or edit the `Config` cell).
 
 # COMMAND ----------
 
@@ -174,24 +197,14 @@ from transformers import (
 )
 
 
-def _pick_attn_implementation() -> str:
-    try:
-        import flash_attn  # noqa: F401
-
-        return "flash_attention_2"
-    except Exception:
-        return "sdpa"
-
-
 def build_model(cfg: Config):
-    attn = _pick_attn_implementation()
-    print(f"Using attn_implementation={attn}")
+    print(f"Using attn_implementation={cfg.attn_implementation}")
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg.model_name,
         num_labels=len(LABELS),
         id2label=ID2LABEL,
         label2id=LABEL2ID,
-        attn_implementation=attn,
+        attn_implementation=cfg.attn_implementation,
     )
     return model
 
@@ -214,7 +227,7 @@ def train(cfg: Config, tokenized, tokenizer):
         eval_strategy="epoch",
         save_strategy="no",
         logging_steps=50,
-        report_to=[],  # MLflow logging is handled explicitly in main().
+        report_to=[],  # MLflow logging is handled explicitly in the next cell.
         seed=cfg.seed,
     )
 
@@ -231,6 +244,13 @@ def train(cfg: Config, tokenized, tokenizer):
     print("Eval metrics:", metrics)
     return trainer, metrics
 
+
+# Run it: fine-tune on the GPU and evaluate.
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+trainer, metrics = train(CFG, tokenized, tokenizer)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -238,7 +258,8 @@ def train(cfg: Config, tokenized, tokenizer):
 # MAGIC We log the fine-tuned model with the MLflow `transformers` flavor (as a
 # MAGIC `text-classification` pipeline) and register it directly to the **Unity Catalog Model
 # MAGIC Registry**, so it can be loaded for batch inference and deployed to Model Serving with no
-# MAGIC extra packaging code. Parameters and metrics are logged to the same MLflow run.
+# MAGIC extra packaging code. Parameters and metrics are logged to the same MLflow run, and the new
+# MAGIC version is promoted to the **`@champion`** alias.
 
 # COMMAND ----------
 
@@ -299,29 +320,7 @@ def _promote_to_champion(cfg: Config, model_info):
     print(f"Registered {cfg.uc_model_fqn} as version {version} and set alias @champion "
           f"(this is the version 03/04 will load).")
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 7. Entry point
-# MAGIC `main()` wires the steps together. The single `if __name__ == "__main__"` guard below
-# MAGIC fires in **both** modes: Databricks notebooks expose `__name__ == "__main__"`, so
-# MAGIC *Run All* triggers it, and the AI Runtime CLI runs the file as a script
-# MAGIC (`python .../01_finetune_singlegpu.py`), which triggers it too — exactly once each way.
-
-# COMMAND ----------
-
-def main():
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-    tokenized, tokenizer = load_and_tokenize(CFG)
-    trainer, metrics = train(CFG, tokenized, tokenizer)
-    run_id = log_and_register(CFG, trainer, tokenizer, metrics)
-    print(f"Done. MLflow run_id={run_id}")
-    return metrics
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+# Run it: log params/metrics/model and promote to @champion.
+run_id = log_and_register(CFG, trainer, tokenizer, metrics)
+print("MLflow run_id:", run_id)

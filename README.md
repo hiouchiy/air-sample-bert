@@ -121,8 +121,18 @@ minutes for a GPU to be provisioned — that is normal. (Note: `air logs` someti
 ## Run it as a notebook (`01_notebook/`)
 
 Import a file from `01_notebook/` into your Databricks workspace (**Workspace → Import → File**),
-attach it to **AI Runtime**, and **Run All**. The `%pip` cells install dependencies automatically.
-Start with `01_finetune_singlegpu.py`, then `03_batch_inference.py`, then `04_serve.py`.
+then **attach a serverless AI Runtime GPU** — there is no cluster to create:
+
+1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+2. Click the **environment** icon to open the **Environment** side panel.
+3. Set **Accelerator** (`GPU_1xA10` for 01/03; **`GPU_8xH100`** for `02_finetune_multigpu.py`) and
+   leave the default **Base environment**.
+4. Click **Apply**, then **Confirm**.
+
+Then **Run All** — each step cell runs and shows its output as you go. The `%pip` cells install
+dependencies automatically. Start with `01_finetune_singlegpu.py`, then `03_batch_inference.py`,
+then `04_serve.py`. See
+[Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 
 - **`02_finetune_multigpu.py` must be attached to a `GPU_8xH100` AI Runtime compute** — not a
   generic/A10 one. As a notebook it runs `serverless_gpu` in local mode, which requires the attached

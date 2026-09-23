@@ -8,7 +8,8 @@
 # MAGIC
 # MAGIC ## Note on execution mode
 # MAGIC Unlike `01`–`03`, this is a **control-plane** step (it calls the Serving REST API), not a
-# MAGIC GPU training job — so it does **not** use the AI Runtime CLI. Run it either way:
+# MAGIC GPU training job — so it needs **no GPU attach** (any compute works) and does **not** use the
+# MAGIC AI Runtime CLI. Run it either way:
 # MAGIC 1. **As a Databricks notebook** — open and *Run All* (the `%pip` cell installs `mlflow`; auth
 # MAGIC    is the notebook's own), **or**
 # MAGIC 2. **Locally / in CI** — install the dependency first, then run with your profile:
@@ -143,6 +144,10 @@ def deploy(cfg: Config):
     print("Endpoint is ready.")
     return client, version
 
+
+# Run it: create/update the endpoint and wait until it is ready.
+client, version = deploy(CFG)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -162,20 +167,7 @@ def query(client, cfg: Config):
         print(f"{pred} <- {text}")
     return predictions
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Entry point
-
-# COMMAND ----------
-
-def main():
-    client, version = deploy(CFG)
-    query(client, CFG)
-    print(f"Done. Endpoint '{CFG.endpoint_name}' serving {CFG.uc_model_fqn} v{version}.")
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+# Run it: send a few real-time requests to the endpoint.
+query(client, CFG)
+print(f"Done. Endpoint '{CFG.endpoint_name}' serving {CFG.uc_model_fqn} v{version}.")

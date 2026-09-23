@@ -6,11 +6,21 @@
 # MAGIC (the `@champion` version) and runs **GPU batch inference** over the AG News test set on an
 # MAGIC AI Runtime GPU. It reports accuracy and throughput and writes the scored rows to a CSV on a
 # MAGIC **Unity Catalog Volume** (a plain file write — no Spark).
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ▶ Before you Run All — attach a serverless GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
+# MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
+# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
+# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
+# MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
-# MAGIC ## How to run this notebook
-# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (`GPU_1xA10` is enough),
-# MAGIC and **Run All**. The `%pip` cell below installs the dependencies. Run `01` (or `02`) first — it
-# MAGIC registers the model and sets the `@champion` alias this step loads.
+# MAGIC Run `01` (or `02`) first — it registers the model and sets the `@champion` alias this step
+# MAGIC loads — then **Run All** here.
+# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/03_batch_inference.py` — run
 # MAGIC > it with `air run --file 02_cli/batch_inference.yaml --watch`.
@@ -18,7 +28,9 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install dependencies (notebook only)
+# MAGIC ## 1. Install dependencies
+# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
+# MAGIC gets them from its workload YAML instead.)
 
 # COMMAND ----------
 
@@ -50,7 +62,7 @@ class Config:
     uc_catalog: str = _env("UC_CATALOG", "main")
     uc_schema: str = _env("UC_SCHEMA", "air_samples")
     registered_model_name: str = _env("REGISTERED_MODEL_NAME", "modernbert_agnews")
-    # Empty -> use models:/<catalog>.<schema>.<name>@champion or latest version.
+    # Empty -> use models:/<catalog>.<schema>.<name>@champion (else falls back to latest version).
     model_uri: str = _env("MODEL_URI", "")
 
     dataset_name: str = _env("DATASET_NAME", "fancyzhx/ag_news")
@@ -104,10 +116,17 @@ def load_model(cfg: Config):
         clf = mlflow.transformers.load_model(uri, device=device)
     return clf, uri
 
+
+# Run it: load the @champion model onto the GPU.
+print(f"CUDA available: {torch.cuda.is_available()}")
+clf, uri = load_model(CFG)
+print("Loaded model from", uri)
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Load input rows
+# MAGIC Load the AG News test split (texts + true labels) to score.
 
 # COMMAND ----------
 
@@ -120,14 +139,22 @@ def load_inputs(cfg: Config):
         ds = ds.select(range(min(cfg.max_samples, ds.num_rows)))
     return ds["text"], ds["label"]
 
+
+# Run it.
+texts, labels = load_inputs(CFG)
+print(f"Loaded {len(texts)} rows to score.")
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. Run GPU batch inference
+# MAGIC Score the texts on the GPU in batches, and log latency/throughput (and accuracy vs. the true
+# MAGIC labels) to an MLflow run.
 
 # COMMAND ----------
 
 import time
+from sklearn.metrics import accuracy_score
 
 
 def run_inference(cfg: Config, clf, texts):
@@ -142,6 +169,20 @@ def run_inference(cfg: Config, clf, texts):
     throughput = len(texts) / elapsed if elapsed > 0 else float("nan")
     print(f"Scored {len(texts)} rows in {elapsed:.1f}s ({throughput:.0f} rows/s)")
     return preds, elapsed, throughput
+
+
+# Run it: score inside an MLflow run and log metrics.
+nested = mlflow.active_run() is not None
+with mlflow.start_run(run_name="modernbert-agnews-batch-inference", nested=nested):
+    preds, elapsed, throughput = run_inference(CFG, clf, texts)
+    mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(texts)})
+    mlflow.log_metric("inference_seconds", elapsed)
+    mlflow.log_metric("rows_per_second", throughput)
+    if labels is not None:
+        pred_ids = [LABELS.index(p["label"]) for p in preds]
+        acc = accuracy_score(labels, pred_ids)
+        mlflow.log_metric("accuracy", acc)
+        print(f"Batch inference accuracy: {acc:.4f}")
 
 # COMMAND ----------
 
@@ -170,37 +211,7 @@ def persist(cfg: Config, texts, preds, labels):
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")
     return path
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 7. Entry point
-
-# COMMAND ----------
-
-def main():
-    from sklearn.metrics import accuracy_score
-
-    mlflow.set_registry_uri("databricks-uc")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    clf, uri = load_model(CFG)
-    texts, labels = load_inputs(CFG)
-
-    nested = mlflow.active_run() is not None
-    with mlflow.start_run(run_name="modernbert-agnews-batch-inference", nested=nested):
-        preds, elapsed, throughput = run_inference(CFG, clf, texts)
-        mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(texts)})
-        mlflow.log_metric("inference_seconds", elapsed)
-        mlflow.log_metric("rows_per_second", throughput)
-        if labels is not None:
-            pred_ids = [LABELS.index(p["label"]) for p in preds]
-            acc = accuracy_score(labels, pred_ids)
-            mlflow.log_metric("accuracy", acc)
-            print(f"Batch inference accuracy: {acc:.4f}")
-        target = persist(CFG, texts, preds, labels)
-        print(f"Output: {target}")
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+# Run it.
+target = persist(CFG, texts, preds, labels)
+print("Output:", target)
