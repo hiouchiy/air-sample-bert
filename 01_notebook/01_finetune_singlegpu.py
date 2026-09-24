@@ -82,6 +82,15 @@ logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
 logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
+# Notebook widget for the UC catalog/schema — set a catalog where you can CREATE schemas/volumes/
+# models (`main` is often locked down in governed workspaces). Runs before Config reads the env.
+# Notebook-only; the CLI copy takes these from the workload YAML / env instead.
+dbutils.widgets.text("UC_CATALOG", "main", "Unity Catalog (must have CREATE)")
+dbutils.widgets.text("UC_SCHEMA", "air_samples", "Schema")
+os.environ["UC_CATALOG"] = dbutils.widgets.get("UC_CATALOG")
+os.environ["UC_SCHEMA"] = dbutils.widgets.get("UC_SCHEMA")
+
+
 def _env(name: str, default: str) -> str:
     """Read an env var, falling back to a default. Keeps notebook and CLI in sync."""
     return os.environ.get(name, default)
