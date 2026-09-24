@@ -1,17 +1,31 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # ModernBERT — Deploy to Databricks Model Serving
+# MAGIC # ModernBERT — (Optional) Deploy to Databricks Model Serving
 # MAGIC
 # MAGIC Creates (or updates) a **GPU Model Serving** endpoint that serves the fine-tuned ModernBERT
 # MAGIC model registered to Unity Catalog by `01`/`02`, waits until it is ready, and sends a test
 # MAGIC request for real-time topic classification.
 # MAGIC
+# MAGIC ## Optional — and it's Model Serving, not AI Runtime
+# MAGIC This repo's core value is **AI Runtime** (serverless-GPU training, multi-GPU, batch inference).
+# MAGIC Real-time serving is a nice add-on, so this step is **optional**. It uses **Databricks Model
+# MAGIC Serving** — the general-purpose GPU serving product, which is **independent of AI Runtime**.
+# MAGIC (AI Runtime has its own custom/LLM serving, but that is oriented to **LLMs** and does not cover
+# MAGIC BERT-class encoder classification — verify current AIR serving support — so we serve ModernBERT
+# MAGIC via standard Model Serving.)
+# MAGIC
+# MAGIC ## How Model Serving works (mental model)
+# MAGIC Register model in UC → create a **serving endpoint** for it → Databricks **builds a container
+# MAGIC and provisions a GPU** (several minutes, one-time) → the endpoint reaches **READY** → you send
+# MAGIC **JSON requests** over HTTPS → it **scales to zero** when idle (the first call after idle pays a
+# MAGIC cold start).
+# MAGIC
 # MAGIC ## Note on execution mode
 # MAGIC Unlike `01`–`03`, this is a **control-plane** step (it calls the Serving REST API), not a
 # MAGIC GPU training job — so it needs **no GPU attach** (any compute works) and does **not** use the
 # MAGIC AI Runtime CLI. Run it either way:
-# MAGIC 1. **As a Databricks notebook** — open and *Run All* (the `%pip` cell installs `mlflow`; auth
-# MAGIC    is the notebook's own), **or**
+# MAGIC 1. **As a Databricks notebook** — run the cells top to bottom (the `%pip` cell installs
+# MAGIC    `mlflow`; auth is the notebook's own), **or**
 # MAGIC 2. **Locally / in CI** — install the dependency first, then run with your profile:
 # MAGIC    ```bash
 # MAGIC    pip install -r requirements.txt        # or: pip install "mlflow>=2.15.0"
@@ -23,16 +37,35 @@
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## 1. Install dependencies
+# MAGIC The `%pip` cell installs `mlflow`. **`%restart_python`** (a Databricks magic) then restarts the
+# MAGIC notebook's Python process so that freshly installed version is the one imported below.
+
+# COMMAND ----------
+
 # MAGIC %pip install -U "mlflow>=2.15.0"
 
 # COMMAND ----------
 
+# MAGIC # Restarts the Python interpreter so the version just installed above is the one imported below.
+# MAGIC # Databricks-specific magic; it clears in-memory state, so continue from the next cell.
 # MAGIC %restart_python
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Configuration
+# MAGIC ## 2. Configuration
+# MAGIC The serving knobs (one line each — these are the ones people trip on):
+# MAGIC - **`endpoint_name`** — the REST endpoint's name (its URL path).
+# MAGIC - **`model_version` / `MODEL_VERSION`** — which UC version to serve (empty = latest).
+# MAGIC - **`workload_type`** — the **serving GPU tier** (`GPU_SMALL`, `GPU_MEDIUM`, …). **These names
+# MAGIC   differ from AI Runtime's** (`GPU_1xA10` / `GPU_8xH100`): `GPU_SMALL` is a single small GPU
+# MAGIC   (e.g. T4/A10-class), which fits ModernBERT with SDPA comfortably.
+# MAGIC - **`workload_size`** — `Small`/`Medium`/`Large` = provisioned **concurrency** (how many
+# MAGIC   simultaneous requests), **not** the GPU.
+# MAGIC - **`scale_to_zero`** — scale to **0 replicas when idle (no cost)**; the next request then pays a
+# MAGIC   **cold start**. Trade cost for tail latency.
 
 # COMMAND ----------
 
@@ -67,7 +100,17 @@ print(CFG)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Resolve the model version and create/update the endpoint
+# MAGIC ## 3. Create (or update) the endpoint
+# MAGIC The endpoint config has two parts that confuse people:
+# MAGIC - **`served_entities`** — *which model/version* to serve (plus its GPU tier + concurrency).
+# MAGIC - **`traffic_config.routes`** — how to split traffic: send `traffic_percentage` to a
+# MAGIC   `served_model_name` (here `"<model>-<version>"`). With one model it's just 100% to it, but
+# MAGIC   this is how you'd do canary / A-B across versions.
+# MAGIC
+# MAGIC **Create vs update is idempotent:** if the endpoint already exists we *update* it instead of
+# MAGIC failing, so re-running this notebook is safe. `_wait_ready` polls until `state.ready == READY`
+# MAGIC and `config_update == NOT_UPDATING`; the **first** deploy takes several minutes because
+# MAGIC Databricks builds the serving container and provisions the GPU.
 
 # COMMAND ----------
 
@@ -145,13 +188,17 @@ def deploy(cfg: Config):
     return client, version
 
 
-# Run it: create/update the endpoint and wait until it is ready.
+# Run it: create/update the endpoint and wait until it is ready (first deploy takes several minutes).
 client, version = deploy(CFG)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Send a test request
+# MAGIC ## 4. Send a test request
+# MAGIC The **request** body for a `transformers` text-classification pipeline is
+# MAGIC `{"inputs": ["text1", "text2", ...]}`; the **response** is `{"predictions": [{"label", "score"},
+# MAGIC ...]}` — one label + score per input row. The **first** call after idle is a **cold start**
+# MAGIC (slower while a replica spins up); subsequent calls are fast.
 
 # COMMAND ----------
 
@@ -171,3 +218,18 @@ def query(client, cfg: Config):
 # Run it: send a few real-time requests to the endpoint.
 query(client, CFG)
 print(f"Done. Endpoint '{CFG.endpoint_name}' serving {CFG.uc_model_fqn} v{version}.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. Call it from outside the notebook (plain REST / curl)
+# MAGIC The endpoint is a standard HTTPS REST service — call it from anywhere with a bearer token:
+# MAGIC ```bash
+# MAGIC curl -s -X POST \
+# MAGIC   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
+# MAGIC   -H "Content-Type: application/json" \
+# MAGIC   -d '{"inputs": ["The central bank raised interest rates."]}' \
+# MAGIC   https://<workspace-host>/serving-endpoints/modernbert-agnews/invocations
+# MAGIC ```
+# MAGIC Replace `<workspace-host>` with your workspace URL and `modernbert-agnews` with `ENDPOINT_NAME`.
+# MAGIC The response is the same `{"predictions": [{"label", "score"}, ...]}` shape as above.

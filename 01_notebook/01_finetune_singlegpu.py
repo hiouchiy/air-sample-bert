@@ -17,7 +17,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## ▶ Before you Run All — attach a serverless GPU
+# MAGIC ## ▶ Before you start — attach a serverless GPU
 # MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
 # MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
 # MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
@@ -25,7 +25,9 @@
 # MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
 # MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
-# MAGIC Then **Run All** — the steps below execute top to bottom and show their output as you go.
+# MAGIC Then **run the cells one at a time, top to bottom**, reviewing each step's output — the dataset
+# MAGIC preview, the training log, the eval metrics, the UC registration. (Run All works too, but
+# MAGIC stepping through is recommended for a sample you're evaluating.)
 # MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/01_finetune_singlegpu.py`
@@ -35,8 +37,10 @@
 
 # MAGIC %md
 # MAGIC ## 1. Install dependencies
-# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
-# MAGIC gets them from its workload YAML instead.)
+# MAGIC The `%pip` cell installs the dependencies. **`%restart_python`** (a Databricks magic) then
+# MAGIC restarts the notebook's Python process so those freshly installed versions are the ones
+# MAGIC imported below — run both once, at the top. (The CLI copy in `02_cli/` gets its dependencies
+# MAGIC from the workload YAML instead.)
 
 # COMMAND ----------
 
@@ -44,6 +48,8 @@
 
 # COMMAND ----------
 
+# MAGIC # Restarts the Python interpreter so the versions just installed above are the ones imported
+# MAGIC # below. Databricks-specific magic; it clears in-memory state, so continue from the next cell.
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -56,8 +62,15 @@
 
 # COMMAND ----------
 
+import logging
 import os
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
+# logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
+# logger so it doesn't look like a failure.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -154,6 +167,18 @@ print(tokenized)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Peek at the raw data
+# MAGIC A few raw rows so the task and the label mapping are clear before we train.
+
+# COMMAND ----------
+
+preview = load_dataset(CFG.dataset_name)["train"].select(range(5)).to_pandas()
+preview["label_name"] = preview["label"].map(dict(enumerate(LABELS)))
+display(preview[["text", "label", "label_name"]])  # display() renders a rich table on Databricks
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 4. Metrics
 # MAGIC Compute accuracy and **macro-F1** (averages the four classes equally, so a weak class can't
 # MAGIC hide behind the majority ones).
@@ -184,6 +209,10 @@ def compute_metrics(eval_pred):
 # MAGIC
 # MAGIC To use FA2: `%pip install flash-attn --no-build-isolation` and set
 # MAGIC `ATTN_IMPLEMENTATION=flash_attention_2` (or edit the `Config` cell).
+# MAGIC
+# MAGIC We set `report_to=["mlflow"]` so the HuggingFace `Trainer` streams the **training loss and
+# MAGIC per-epoch eval metrics to MLflow as curves** — into the run we open just below (step 6 then
+# MAGIC logs the final metrics and the model into that same run).
 
 # COMMAND ----------
 
@@ -227,7 +256,7 @@ def train(cfg: Config, tokenized, tokenizer):
         eval_strategy="epoch",
         save_strategy="no",
         logging_steps=50,
-        report_to=[],  # MLflow logging is handled explicitly in the next cell.
+        report_to=["mlflow"],  # stream loss/eval curves to the active MLflow run
         seed=cfg.seed,
     )
 
@@ -245,7 +274,15 @@ def train(cfg: Config, tokenized, tokenizer):
     return trainer, metrics
 
 
-# Run it: fine-tune on the GPU and evaluate.
+# Run it. We open a single MLflow run FIRST, so the Trainer's MLflow callback logs the training
+# curves into it; step 6 then adds the final metrics and the model to the same run.
+import mlflow
+
+mlflow.set_registry_uri("databricks-uc")
+if mlflow.active_run():  # make re-running this cell safe
+    mlflow.end_run()
+mlflow.start_run(run_name="modernbert-agnews-singlegpu")
+
 print(f"CUDA available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -255,21 +292,23 @@ trainer, metrics = train(CFG, tokenized, tokenizer)
 
 # MAGIC %md
 # MAGIC ## 6. Log to MLflow & register to Unity Catalog
-# MAGIC We log the fine-tuned model with the MLflow `transformers` flavor (as a
-# MAGIC `text-classification` pipeline) and register it directly to the **Unity Catalog Model
-# MAGIC Registry**, so it can be loaded for batch inference and deployed to Model Serving with no
-# MAGIC extra packaging code. Parameters and metrics are logged to the same MLflow run, and the new
-# MAGIC version is promoted to the **`@champion`** alias.
+# MAGIC We log the fine-tuned model with the MLflow `transformers` flavor (as a `text-classification`
+# MAGIC pipeline) into the **same run** that already holds the training curves, and register it to the
+# MAGIC **Unity Catalog Model Registry** — so it can be loaded for batch inference and deployed to
+# MAGIC Model Serving with no extra packaging code. The new version is promoted to the **`@champion`**
+# MAGIC alias. (We package the pipeline on CPU so the artifact is portable — see the code comment.)
 
 # COMMAND ----------
 
-import mlflow
 from transformers import pipeline
 
 
 def log_and_register(cfg: Config, trainer, tokenizer, metrics):
     mlflow.set_registry_uri("databricks-uc")
 
+    # Package on CPU so the logged model loads on any hardware, and so MLflow's signature
+    # inference (it runs the pipeline once at log time) doesn't hit a GPU/CPU device mismatch.
+    # Training ran on GPU; only this serialization step uses CPU.
     clf = pipeline(
         "text-classification",
         model=trainer.model.to("cpu"),
@@ -277,36 +316,36 @@ def log_and_register(cfg: Config, trainer, tokenizer, metrics):
     )
     example = ["Wall Street stocks rallied as tech earnings beat expectations."]
 
-    # Log inside the run AI Runtime already created (nested=... makes this safe in a
-    # notebook too, where a run may or may not be active).
-    nested = mlflow.active_run() is not None
-    with mlflow.start_run(run_name="modernbert-agnews-singlegpu", nested=nested) as run:
-        mlflow.log_params(
-            {
-                "model_name": cfg.model_name,
-                "dataset": cfg.dataset_name,
-                "max_length": cfg.max_length,
-                "epochs": cfg.epochs,
-                "train_batch_size": cfg.train_batch_size,
-                "learning_rate": cfg.learning_rate,
-                "max_train_samples": cfg.max_train_samples,
-                "training_mode": "single-gpu",
-            }
-        )
-        mlflow.log_metrics(
-            {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
-        )
-        model_info = mlflow.transformers.log_model(
-            transformers_model=clf,
-            artifact_path="model",
-            task="text-classification",
-            input_example=example,
-            registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
-        )
-        print("Logged model:", model_info.model_uri)
-        if cfg.register_model:
-            _promote_to_champion(cfg, model_info)
-        return run.info.run_id
+    # Log into the run opened in step 5 (which already has the training/eval curves).
+    run = mlflow.active_run()
+    # HF's MLflow callback already logged the Trainer args + model config; add our extra config
+    # under distinct keys, skipping any that would collide (avoids a duplicate-key RestException,
+    # e.g. the model config's own `max_length`).
+    for _k, _v in {
+        "base_model": cfg.model_name,
+        "dataset": cfg.dataset_name,
+        "tokenizer_max_length": cfg.max_length,
+        "max_train_samples": cfg.max_train_samples,
+        "training_mode": "single-gpu",
+    }.items():
+        try:
+            mlflow.log_param(_k, _v)
+        except Exception:
+            pass
+    mlflow.log_metrics(
+        {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+    )
+    model_info = mlflow.transformers.log_model(
+        transformers_model=clf,
+        artifact_path="model",
+        task="text-classification",
+        input_example=example,
+        registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
+    )
+    print("Logged model:", model_info.model_uri)
+    if cfg.register_model:
+        _promote_to_champion(cfg, model_info)
+    return run.info.run_id
 
 
 def _promote_to_champion(cfg: Config, model_info):
@@ -321,6 +360,7 @@ def _promote_to_champion(cfg: Config, model_info):
           f"(this is the version 03/04 will load).")
 
 
-# Run it: log params/metrics/model and promote to @champion.
+# Run it: log params/final metrics/model into the active run, promote to @champion, then close it.
 run_id = log_and_register(CFG, trainer, tokenizer, metrics)
+mlflow.end_run()
 print("MLflow run_id:", run_id)

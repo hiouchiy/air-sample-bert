@@ -10,7 +10,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## ▶ Before you Run All — attach a serverless GPU
+# MAGIC ## ▶ Before you start — attach a serverless GPU
 # MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
 # MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
 # MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
@@ -19,7 +19,8 @@
 # MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
 # MAGIC Run `01` (or `02`) first — it registers the model and sets the `@champion` alias this step
-# MAGIC loads — then **Run All** here.
+# MAGIC loads — then **run the cells one at a time, top to bottom**, reviewing each step's output.
+# MAGIC (Run All works too, but stepping through is recommended for a sample you're evaluating.)
 # MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/03_batch_inference.py` — run
@@ -29,8 +30,10 @@
 
 # MAGIC %md
 # MAGIC ## 1. Install dependencies
-# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
-# MAGIC gets them from its workload YAML instead.)
+# MAGIC The `%pip` cell installs the dependencies. **`%restart_python`** (a Databricks magic) then
+# MAGIC restarts the notebook's Python process so those freshly installed versions are the ones
+# MAGIC imported below — run both once, at the top. (The CLI copy in `02_cli/` gets its dependencies
+# MAGIC from the workload YAML instead.)
 
 # COMMAND ----------
 
@@ -38,6 +41,8 @@
 
 # COMMAND ----------
 
+# MAGIC # Restarts the Python interpreter so the versions just installed above are the ones imported
+# MAGIC # below. Databricks-specific magic; it clears in-memory state, so continue from the next cell.
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -46,11 +51,24 @@
 # MAGIC ## 2. Configuration
 # MAGIC By default we load the registered UC model's **`@champion`** alias and score the AG News
 # MAGIC test split. Point `MODEL_URI` at a specific version or alias to score with a different model.
+# MAGIC
+# MAGIC This step loads the **`@champion`** version of `<catalog>.<schema>.modernbert_agnews`. Both
+# MAGIC `01` (single-GPU) and `02` (multi-GPU) set `@champion` to the model they just trained, so
+# MAGIC **03 scores whichever you ran last**. To score a specific model: re-run `01` or `02` (it
+# MAGIC re-promotes `@champion`), or set `MODEL_URI` to a version/alias, e.g.
+# MAGIC `models:/<catalog>.<schema>.modernbert_agnews/3` (empty `MODEL_URI` = `@champion`).
 
 # COMMAND ----------
 
+import logging
 import os
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
+# logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
+# logger so it doesn't look like a failure.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -144,6 +162,11 @@ def load_inputs(cfg: Config):
 texts, labels = load_inputs(CFG)
 print(f"Loaded {len(texts)} rows to score.")
 
+# Peek at a couple of input rows (text + true class) before scoring.
+_preview = [{"text": t, "true_label": LABELS[y]} for t, y in list(zip(texts, labels))[:3]]
+for row in _preview:
+    print(row)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -205,7 +228,15 @@ def persist(cfg: Config, texts, preds, labels):
     pdf = pd.DataFrame(rows)
 
     out_dir = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
-    os.makedirs(out_dir, exist_ok=True)
+    # A UC Volume can't be created by mkdir on the /Volumes FUSE mount (that raises a cryptic
+    # Errno 95). If the Volume is missing, tell the user exactly how to create it.
+    if not os.path.isdir(out_dir):
+        raise FileNotFoundError(
+            f"UC Volume {out_dir} not found. Create it once:\n"
+            f"  databricks volumes create {cfg.uc_catalog} {cfg.uc_schema} predictions MANAGED\n"
+            f"(or run setup.sh with CATALOG={cfg.uc_catalog}), or set UC_CATALOG/UC_SCHEMA to an "
+            f"existing Volume."
+        )
     path = f"{out_dir}/{cfg.output_name}.csv"
     pdf.to_csv(path, index=False)
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")

@@ -1,6 +1,6 @@
 """ModernBERT multi-GPU (8xH100) DDP fine-tuning on AG News — AI Runtime CLI script.
 
-Launched by torchrun (see air/finetune_multigpu.yaml: `torchrun --standalone
+Launched by torchrun (see 02_cli/finetune_multigpu.yaml: `torchrun --standalone
 --nproc_per_node=gpu ...`), which starts one process per GPU. Hugging Face Trainer reads the
 torchrun env vars and runs PyTorch DDP.
     COPYFILE_DISABLE=1 air run --file 02_cli/finetune_multigpu.yaml --watch --profile <your-profile>
@@ -8,8 +8,14 @@ The notebook equivalent (01_notebook/02_finetune_multigpu.py) uses serverless_gp
 `@distributed` / `run_train.distributed()` instead of torchrun.
 """
 
+import logging
 import os
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning. It's
+# harmless (MLflow skips a couple of optional tags and continues) — quiet just that logger.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -29,6 +35,9 @@ class Config:
     # Default to the FULL training set — the point of multi-GPU is throughput at scale.
     max_train_samples: int = int(_env("MAX_TRAIN_SAMPLES", "-1"))
     max_eval_samples: int = int(_env("MAX_EVAL_SAMPLES", "-1"))
+
+    # Attention backend: "sdpa" (default) or "flash_attention_2" (needs a matching flash-attn build).
+    attn_implementation: str = _env("ATTN_IMPLEMENTATION", "sdpa")
 
     # Training hyper-parameters -----------------------------------------
     epochs: float = float(_env("EPOCHS", "2"))
@@ -107,20 +116,13 @@ def _train_impl():
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     # --- Model --------------------------------------------------------
-    try:
-        import flash_attn  # noqa: F401
-
-        attn = "flash_attention_2"
-    except Exception:
-        attn = "sdpa"
-    log(f"attn_implementation={attn}")
-
+    log(f"attn_implementation={cfg.attn_implementation}")
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg.model_name,
         num_labels=len(LABELS),
         id2label=ID2LABEL,
         label2id=LABEL2ID,
-        attn_implementation=attn,
+        attn_implementation=cfg.attn_implementation,
     )
 
     def compute_metrics(eval_pred):
@@ -144,7 +146,7 @@ def _train_impl():
         eval_strategy="epoch",
         save_strategy="no",
         logging_steps=50,
-        report_to=[],
+        report_to=["mlflow"],  # HF's MLflow callback logs loss/eval curves (rank 0 only) -> active run
         ddp_find_unused_parameters=False,
         seed=cfg.seed,
     )
@@ -158,61 +160,71 @@ def _train_impl():
         compute_metrics=compute_metrics,
     )
 
+    # Rank 0 opens the MLflow run BEFORE training so the Trainer's MLflow callback logs the
+    # loss/eval curves into it (the callback only logs from rank 0, so this is DDP-safe).
+    if is_main:
+        import mlflow
+
+        mlflow.set_registry_uri("databricks-uc")
+        mlflow.start_run(run_name="modernbert-agnews-multigpu")
+
     t0 = time.time()
     trainer.train()
     train_secs = time.time() - t0
     metrics = trainer.evaluate()
     log(f"train_seconds={train_secs:.1f} eval_metrics={metrics}")
 
-    # --- Log & register from rank 0 only ------------------------------
+    # --- Add final metrics + model to the SAME run, from rank 0 only --
     if is_main:
-        import mlflow
         from transformers import pipeline
 
-        mlflow.set_registry_uri("databricks-uc")
+        # Package on CPU so the logged model loads on any hardware, and so MLflow's signature
+        # inference (it runs the pipeline once at log time) doesn't hit a GPU/CPU device mismatch.
+        # Training ran on GPU; only this serialization step uses CPU.
         clf = pipeline("text-classification", model=trainer.model.to("cpu"), tokenizer=tokenizer)
         example = ["Wall Street stocks rallied as tech earnings beat expectations."]
 
-        nested = mlflow.active_run() is not None
-        with mlflow.start_run(run_name="modernbert-agnews-multigpu", nested=nested):
-            mlflow.log_params(
-                {
-                    "model_name": cfg.model_name,
-                    "dataset": cfg.dataset_name,
-                    "max_length": cfg.max_length,
-                    "epochs": cfg.epochs,
-                    "per_device_train_batch_size": cfg.train_batch_size,
-                    "effective_batch_size": cfg.train_batch_size * world_size,
-                    "learning_rate": cfg.learning_rate,
-                    "world_size": world_size,
-                    "training_mode": f"ddp-{world_size}x{cfg.gpu_type}",
-                }
-            )
-            mlflow.log_metric("train_seconds", train_secs)
-            mlflow.log_metrics(
-                {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
-            )
-            info = mlflow.transformers.log_model(
-                transformers_model=clf,
-                artifact_path="model",
-                task="text-classification",
-                input_example=example,
-                registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
-            )
-            log(f"logged model: {info.model_uri}")
-            if cfg.register_model:
-                from mlflow.tracking import MlflowClient
+        # HF's MLflow callback already logged the Trainer args + model config; add our extra config
+        # under distinct keys, skipping any that would collide (avoids a duplicate-key
+        # RestException, e.g. the model config's own `max_length`).
+        for _k, _v in {
+            "base_model": cfg.model_name,
+            "dataset": cfg.dataset_name,
+            "tokenizer_max_length": cfg.max_length,
+            "effective_batch_size": cfg.train_batch_size * world_size,
+            "ddp_world_size": world_size,
+            "training_mode": f"ddp-{world_size}x{cfg.gpu_type}",
+        }.items():
+            try:
+                mlflow.log_param(_k, _v)
+            except Exception:
+                pass
+        mlflow.log_metric("train_seconds", train_secs)
+        mlflow.log_metrics(
+            {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+        )
+        info = mlflow.transformers.log_model(
+            transformers_model=clf,
+            artifact_path="model",
+            task="text-classification",
+            input_example=example,
+            registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
+        )
+        log(f"logged model: {info.model_uri}")
+        if cfg.register_model:
+            from mlflow.tracking import MlflowClient
 
-                v = info.registered_model_version
-                MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
-                    cfg.uc_model_fqn, "champion", v)
-                log(f"registered {cfg.uc_model_fqn} version {v} and set alias @champion")
+            v = info.registered_model_version
+            MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
+                cfg.uc_model_fqn, "champion", v)
+            log(f"registered {cfg.uc_model_fqn} version {v} and set alias @champion")
+        mlflow.end_run()
 
     return metrics
 
 
 def main():
-    # This script is launched by torchrun (see air/finetune_multigpu.yaml), which starts one
+    # This script is launched by torchrun (see 02_cli/finetune_multigpu.yaml), which starts one
     # process per GPU and sets RANK/WORLD_SIZE/LOCAL_RANK. Each process runs the training directly.
     return _train_impl()
 

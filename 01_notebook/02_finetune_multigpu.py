@@ -15,7 +15,7 @@
 # MAGIC corpus in a fraction of the wall-clock time. (Model-parallel / FSDP / DeepSpeed are only
 # MAGIC needed when a model does not fit on one GPU — not the case for BERT-class encoders.)
 # MAGIC
-# MAGIC ## ▶ Before you Run All — attach a serverless 8×H100 GPU
+# MAGIC ## ▶ Before you start — attach a serverless 8×H100 GPU
 # MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
 # MAGIC **`GPU_8xH100`** node (the `@distributed` decorator runs in local mode and requires the
 # MAGIC attached GPU type to match `gpu_type="H100"`). Attach one from the notebook itself:
@@ -24,8 +24,9 @@
 # MAGIC 3. Set **Accelerator** to **8xH100** (`GPU_8xH100`); leave the default **Base environment**.
 # MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
-# MAGIC Then **Run All** — the final cell calls `run_train.distributed()`, which `serverless_gpu` fans
-# MAGIC out across the node's 8 GPUs (one process per GPU).
+# MAGIC Then **run the cells one at a time, top to bottom**, reviewing each step's output; the final
+# MAGIC cell calls `run_train.distributed()`, which fans out across the node's 8 GPUs. (Run All works
+# MAGIC too, but stepping through is recommended for a sample you're evaluating.)
 # MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > The CLI equivalent (`02_cli/02_finetune_multigpu.py`, launched with `torchrun`) trains the
@@ -35,8 +36,10 @@
 
 # MAGIC %md
 # MAGIC ## 1. Install dependencies
-# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
-# MAGIC gets them from its workload YAML instead.)
+# MAGIC The `%pip` cell installs the dependencies. **`%restart_python`** (a Databricks magic) then
+# MAGIC restarts the notebook's Python process so those freshly installed versions are the ones
+# MAGIC imported below — run both once, at the top. (The CLI copy in `02_cli/` gets its dependencies
+# MAGIC from the workload YAML instead.)
 
 # COMMAND ----------
 
@@ -44,6 +47,8 @@
 
 # COMMAND ----------
 
+# MAGIC # Restarts the Python interpreter so the versions just installed above are the ones imported
+# MAGIC # below. Databricks-specific magic; it clears in-memory state, so continue from the next cell.
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -113,15 +118,41 @@ LABEL2ID = {l: i for i, l in enumerate(LABELS)}
 
 # MAGIC %md
 # MAGIC ## 3. The distributed training function
-# MAGIC Everything the workers need lives **inside** `_train_impl()` — imports, data loading, model
-# MAGIC init and the training loop — because `serverless_gpu` ships this function to each GPU worker
-# MAGIC process. Hugging Face `Trainer` reads the `torch.distributed` env vars (`RANK`, `WORLD_SIZE`,
-# MAGIC `LOCAL_RANK`, ...) that `@distributed` sets and runs DDP; we only log/register from rank 0.
 # MAGIC
-# MAGIC The attention backend defaults to **PyTorch SDPA** (built in, runs anywhere). To use
-# MAGIC **Flash Attention 2** (faster on H100, but it compiles a CUDA extension to match your exact
-# MAGIC PyTorch/CUDA/GPU and can be slow to install), add `flash-attn` to the deps and set
-# MAGIC `ATTN_IMPLEMENTATION=flash_attention_2`.
+# MAGIC ### What `serverless_gpu` / `@distributed` is (the Databricks-unique part)
+# MAGIC `serverless_gpu` is a **Databricks AI Runtime library** (preinstalled in the AIR environment,
+# MAGIC currently Beta) — **not** a generic PyPI package. It runs a plain Python function across
+# MAGIC multiple **serverless** GPUs with **no cluster to create, no `torchrun`, no shell launcher**.
+# MAGIC See [Distributed training on serverless GPU](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/).
+# MAGIC
+# MAGIC ### What `distributed(gpus=N, gpu_type="H100")` does, step by step
+# MAGIC 1. Claims **N GPUs of that type** and launches **one worker process per GPU**.
+# MAGIC 2. Sets up the `torch.distributed` rendezvous env (`RANK`, `WORLD_SIZE`, `LOCAL_RANK`,
+# MAGIC    `MASTER_ADDR/PORT`) on every worker.
+# MAGIC 3. **Ships `_train_impl` (and its closure) to every worker** and runs them in parallel — so
+# MAGIC    HF `Trainer` sees a DDP world and data-parallelizes automatically.
+# MAGIC 4. Returns rank 0's result.
+# MAGIC
+# MAGIC ### Why `_train_impl` must be self-contained
+# MAGIC It is serialized and shipped to separate worker processes, so its imports, data loading and
+# MAGIC model init all live **inside** the function — top-level notebook state isn't available there.
+# MAGIC
+# MAGIC ### The two-step dispatch (easy to miss)
+# MAGIC ```python
+# MAGIC run_train = distributed(gpus=CFG.num_gpus, gpu_type=CFG.gpu_type)(_train_impl)  # wrap into a launcher
+# MAGIC result = run_train.distributed()                                               # trigger the fan-out
+# MAGIC ```
+# MAGIC The first line *wraps* the function into a distributed launcher; the second line (step 4)
+# MAGIC *actually runs* it across the GPUs. The `02_cli/` copy launches the same `_train_impl` with
+# MAGIC `torchrun --nproc_per_node=gpu` instead — same DDP, a different launcher.
+# MAGIC
+# MAGIC ### Attention backend
+# MAGIC Defaults to **PyTorch SDPA** (built in, runs anywhere). To use **Flash Attention 2** (faster on
+# MAGIC H100, but it compiles a CUDA extension to match your exact PyTorch/CUDA/GPU and can be slow to
+# MAGIC install), add `flash-attn` to the deps and set `ATTN_IMPLEMENTATION=flash_attention_2`.
+# MAGIC
+# MAGIC We set `report_to=["mlflow"]`, and rank 0 opens the MLflow run **before** `trainer.train()`,
+# MAGIC so the training/eval curves stream into the same run that later gets the final metrics + model.
 
 # COMMAND ----------
 
@@ -129,6 +160,7 @@ from serverless_gpu import distributed
 
 
 def _train_impl():
+    import logging
     import time
 
     import numpy as np
@@ -205,7 +237,7 @@ def _train_impl():
         eval_strategy="epoch",
         save_strategy="no",
         logging_steps=50,
-        report_to=[],
+        report_to=["mlflow"],  # HF's MLflow callback logs loss/eval curves (rank 0 only) -> active run
         ddp_find_unused_parameters=False,
         seed=cfg.seed,
     )
@@ -219,68 +251,81 @@ def _train_impl():
         compute_metrics=compute_metrics,
     )
 
+    # Rank 0 opens the MLflow run BEFORE training so the Trainer's MLflow callback logs the
+    # loss/eval curves into it (the callback only logs from rank 0, so this is DDP-safe).
+    if is_main:
+        import mlflow
+
+        # Quiet the benign serverless py4j-whitelist warning MLflow logs while resolving tags.
+        logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+        mlflow.set_registry_uri("databricks-uc")
+        mlflow.start_run(run_name="modernbert-agnews-multigpu")
+
     t0 = time.time()
     trainer.train()
     train_secs = time.time() - t0
     metrics = trainer.evaluate()
     log(f"train_seconds={train_secs:.1f} eval_metrics={metrics}")
 
-    # --- Log & register from rank 0 only ------------------------------
+    # --- Add final metrics + model to the SAME run, from rank 0 only --
     if is_main:
-        import mlflow
         from transformers import pipeline
 
-        mlflow.set_registry_uri("databricks-uc")
+        # Package on CPU so the logged model loads on any hardware, and so MLflow's signature
+        # inference (it runs the pipeline once at log time) doesn't hit a GPU/CPU device mismatch.
+        # Training ran on GPU; only this serialization step uses CPU.
         clf = pipeline("text-classification", model=trainer.model.to("cpu"), tokenizer=tokenizer)
         example = ["Wall Street stocks rallied as tech earnings beat expectations."]
 
-        nested = mlflow.active_run() is not None
-        with mlflow.start_run(run_name="modernbert-agnews-multigpu", nested=nested):
-            mlflow.log_params(
-                {
-                    "model_name": cfg.model_name,
-                    "dataset": cfg.dataset_name,
-                    "max_length": cfg.max_length,
-                    "epochs": cfg.epochs,
-                    "per_device_train_batch_size": cfg.train_batch_size,
-                    "effective_batch_size": cfg.train_batch_size * world_size,
-                    "learning_rate": cfg.learning_rate,
-                    "world_size": world_size,
-                    "training_mode": f"ddp-{world_size}x{cfg.gpu_type}",
-                }
-            )
-            mlflow.log_metric("train_seconds", train_secs)
-            mlflow.log_metrics(
-                {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
-            )
-            info = mlflow.transformers.log_model(
-                transformers_model=clf,
-                artifact_path="model",
-                task="text-classification",
-                input_example=example,
-                registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
-            )
-            log(f"logged model: {info.model_uri}")
-            if cfg.register_model:
-                from mlflow.tracking import MlflowClient
+        # HF's MLflow callback already logged the Trainer args + model config; add our extra config
+        # under distinct keys, skipping any that would collide (avoids a duplicate-key
+        # RestException, e.g. the model config's own `max_length`).
+        for _k, _v in {
+            "base_model": cfg.model_name,
+            "dataset": cfg.dataset_name,
+            "tokenizer_max_length": cfg.max_length,
+            "effective_batch_size": cfg.train_batch_size * world_size,
+            "ddp_world_size": world_size,
+            "training_mode": f"ddp-{world_size}x{cfg.gpu_type}",
+        }.items():
+            try:
+                mlflow.log_param(_k, _v)
+            except Exception:
+                pass
+        mlflow.log_metric("train_seconds", train_secs)
+        mlflow.log_metrics(
+            {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+        )
+        info = mlflow.transformers.log_model(
+            transformers_model=clf,
+            artifact_path="model",
+            task="text-classification",
+            input_example=example,
+            registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
+        )
+        log(f"logged model: {info.model_uri}")
+        if cfg.register_model:
+            from mlflow.tracking import MlflowClient
 
-                v = info.registered_model_version
-                MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
-                    cfg.uc_model_fqn, "champion", v)
-                log(f"registered {cfg.uc_model_fqn} version {v} and set alias @champion")
+            v = info.registered_model_version
+            MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
+                cfg.uc_model_fqn, "champion", v)
+            log(f"registered {cfg.uc_model_fqn} version {v} and set alias @champion")
+        mlflow.end_run()
 
     return metrics
 
 
-# The notebook launch handle: `serverless_gpu` ships `_train_impl` to `num_gpus` workers.
+# Two-step dispatch (see §3): first WRAP _train_impl into a distributed launcher...
 run_train = distributed(gpus=CFG.num_gpus, gpu_type=CFG.gpu_type)(_train_impl)
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Launch the distributed training
-# MAGIC `run_train.distributed()` fans `_train_impl` out across all `num_gpus` GPUs of the attached
-# MAGIC node (one process per GPU) and runs PyTorch DDP. Each call also creates an MLflow run.
+# MAGIC `run_train.distributed()` is the second dispatch step: it fans `_train_impl` out across all
+# MAGIC `num_gpus` GPUs of the attached node (one process per GPU) and runs PyTorch DDP. Rank 0 logs a
+# MAGIC single MLflow run (training curves → final metrics → registered `@champion` model).
 
 # COMMAND ----------
 

@@ -6,8 +6,14 @@ Dependencies come from the YAML (environment.dependencies); config is via env va
 The notebook-optimized equivalent is 01_notebook/01_finetune_singlegpu.py.
 """
 
+import logging
 import os
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning. It's
+# harmless (MLflow skips a couple of optional tags and continues) — quiet just that logger.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -24,6 +30,9 @@ class Config:
     # Sub-sample to keep the single-GPU demo fast. Set to -1 to use the full split.
     max_train_samples: int = int(_env("MAX_TRAIN_SAMPLES", "20000"))
     max_eval_samples: int = int(_env("MAX_EVAL_SAMPLES", "2000"))
+
+    # Attention backend: "sdpa" (default) or "flash_attention_2" (needs a matching flash-attn build).
+    attn_implementation: str = _env("ATTN_IMPLEMENTATION", "sdpa")
 
     # Training hyper-parameters -------------------------------------------
     epochs: float = float(_env("EPOCHS", "1"))
@@ -109,24 +118,14 @@ from transformers import (
 )
 
 
-def _pick_attn_implementation() -> str:
-    try:
-        import flash_attn  # noqa: F401
-
-        return "flash_attention_2"
-    except Exception:
-        return "sdpa"
-
-
 def build_model(cfg: Config):
-    attn = _pick_attn_implementation()
-    print(f"Using attn_implementation={attn}")
+    print(f"Using attn_implementation={cfg.attn_implementation}")
     model = AutoModelForSequenceClassification.from_pretrained(
         cfg.model_name,
         num_labels=len(LABELS),
         id2label=ID2LABEL,
         label2id=LABEL2ID,
-        attn_implementation=attn,
+        attn_implementation=cfg.attn_implementation,
     )
     return model
 
@@ -149,7 +148,7 @@ def train(cfg: Config, tokenized, tokenizer):
         eval_strategy="epoch",
         save_strategy="no",
         logging_steps=50,
-        report_to=[],  # MLflow logging is handled explicitly in main().
+        report_to=["mlflow"],  # stream loss/eval curves to the active MLflow run (opened in main)
         seed=cfg.seed,
     )
 
@@ -174,6 +173,9 @@ from transformers import pipeline
 def log_and_register(cfg: Config, trainer, tokenizer, metrics):
     mlflow.set_registry_uri("databricks-uc")
 
+    # Package on CPU so the logged model loads on any hardware, and so MLflow's signature
+    # inference (it runs the pipeline once at log time) doesn't hit a GPU/CPU device mismatch.
+    # Training ran on GPU; only this serialization step uses CPU.
     clf = pipeline(
         "text-classification",
         model=trainer.model.to("cpu"),
@@ -181,36 +183,36 @@ def log_and_register(cfg: Config, trainer, tokenizer, metrics):
     )
     example = ["Wall Street stocks rallied as tech earnings beat expectations."]
 
-    # Log inside the run AI Runtime already created (nested=... makes this safe in a
-    # notebook too, where a run may or may not be active).
-    nested = mlflow.active_run() is not None
-    with mlflow.start_run(run_name="modernbert-agnews-singlegpu", nested=nested) as run:
-        mlflow.log_params(
-            {
-                "model_name": cfg.model_name,
-                "dataset": cfg.dataset_name,
-                "max_length": cfg.max_length,
-                "epochs": cfg.epochs,
-                "train_batch_size": cfg.train_batch_size,
-                "learning_rate": cfg.learning_rate,
-                "max_train_samples": cfg.max_train_samples,
-                "training_mode": "single-gpu",
-            }
-        )
-        mlflow.log_metrics(
-            {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
-        )
-        model_info = mlflow.transformers.log_model(
-            transformers_model=clf,
-            artifact_path="model",
-            task="text-classification",
-            input_example=example,
-            registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
-        )
-        print("Logged model:", model_info.model_uri)
-        if cfg.register_model:
-            _promote_to_champion(cfg, model_info)
-        return run.info.run_id
+    # Log into the active run (opened by main), which already holds the training/eval curves.
+    run = mlflow.active_run()
+    # HF's MLflow callback already logged the Trainer args + model config; add our extra config
+    # under distinct keys, skipping any that would collide (avoids a duplicate-key RestException,
+    # e.g. the model config's own `max_length`).
+    for _k, _v in {
+        "base_model": cfg.model_name,
+        "dataset": cfg.dataset_name,
+        "tokenizer_max_length": cfg.max_length,
+        "max_train_samples": cfg.max_train_samples,
+        "training_mode": "single-gpu",
+    }.items():
+        try:
+            mlflow.log_param(_k, _v)
+        except Exception:
+            pass
+    mlflow.log_metrics(
+        {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+    )
+    model_info = mlflow.transformers.log_model(
+        transformers_model=clf,
+        artifact_path="model",
+        task="text-classification",
+        input_example=example,
+        registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
+    )
+    print("Logged model:", model_info.model_uri)
+    if cfg.register_model:
+        _promote_to_champion(cfg, model_info)
+    return run.info.run_id
 
 
 def _promote_to_champion(cfg: Config, model_info):
@@ -230,8 +232,12 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     tokenized, tokenizer = load_and_tokenize(CFG)
-    trainer, metrics = train(CFG, tokenized, tokenizer)
-    run_id = log_and_register(CFG, trainer, tokenizer, metrics)
+    mlflow.set_registry_uri("databricks-uc")
+    # One run: the Trainer's MLflow callback logs the training/eval curves into it, then
+    # log_and_register adds the final metrics and the model to the same run.
+    with mlflow.start_run(run_name="modernbert-agnews-singlegpu"):
+        trainer, metrics = train(CFG, tokenized, tokenizer)
+        run_id = log_and_register(CFG, trainer, tokenizer, metrics)
     print(f"Done. MLflow run_id={run_id}")
     return metrics
 

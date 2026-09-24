@@ -6,8 +6,14 @@ predictions as a CSV to a UC Volume. Requires a model registered by 01/02 first.
 The notebook equivalent is 01_notebook/03_batch_inference.py.
 """
 
+import logging
 import os
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning. It's
+# harmless (MLflow skips a couple of optional tags and continues) — quiet just that logger.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -107,7 +113,15 @@ def persist(cfg: Config, texts, preds, labels):
     pdf = pd.DataFrame(rows)
 
     out_dir = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
-    os.makedirs(out_dir, exist_ok=True)
+    # A UC Volume can't be created by mkdir on the /Volumes FUSE mount (that raises a cryptic
+    # Errno 95). If the Volume is missing, tell the user exactly how to create it.
+    if not os.path.isdir(out_dir):
+        raise FileNotFoundError(
+            f"UC Volume {out_dir} not found. Create it once:\n"
+            f"  databricks volumes create {cfg.uc_catalog} {cfg.uc_schema} predictions MANAGED\n"
+            f"(or run setup.sh with CATALOG={cfg.uc_catalog}), or set UC_CATALOG/UC_SCHEMA to an "
+            f"existing Volume."
+        )
     path = f"{out_dir}/{cfg.output_name}.csv"
     pdf.to_csv(path, index=False)
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")

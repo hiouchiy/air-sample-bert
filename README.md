@@ -1,11 +1,12 @@
 # AI Runtime sample: ModernBERT on AG News
 
-End-to-end **BERT-class fine-tuning, batch inference, and serving** on **Databricks AI Runtime**
-(serverless NVIDIA GPUs). It fine-tunes **[ModernBERT](https://huggingface.co/answerdotai/ModernBERT-base)**
+End-to-end **BERT-class fine-tuning and batch inference** on **Databricks AI Runtime**
+(serverless NVIDIA GPUs), then **optionally** deploy to **Databricks Model Serving**. It fine-tunes
+**[ModernBERT](https://huggingface.co/answerdotai/ModernBERT-base)**
 — the current mainstream BERT-class encoder (RoPE, Flash Attention 2, 8k context, released Dec 2024)
 — for **topic classification** on the public **AG News** dataset (4 classes: World, Sports, Business,
 Sci/Tech), tracks everything with **MLflow**, registers the model to **Unity Catalog**, runs **GPU
-batch inference**, and deploys a **Model Serving** endpoint.
+batch inference**, and (optionally) deploys a **Model Serving** endpoint.
 
 > AIR = AI Runtime.
 
@@ -13,8 +14,8 @@ batch inference**, and deploys a **Model Serving** endpoint.
 
 Each step ships in **two forms**, so you can pick whichever fits and neither needs editing:
 
-- **`01_notebook/`** — Databricks notebooks (`# Databricks notebook source` `.py`). **Import into the
-  workspace and Run All.** Rich per-cell markdown; `%pip` cells install dependencies.
+- **`01_notebook/`** — Databricks notebooks (`# Databricks notebook source` `.py`). **Import and step
+  through the cells** (top to bottom). Rich per-cell markdown; `%pip` cells install dependencies.
 - **`02_cli/`** — plain Python scripts + AI Runtime CLI workload YAMLs. **Submit with `air run`.**
   No notebook markers; dependencies come from the YAML.
 
@@ -28,7 +29,7 @@ Both forms share the same logic and are driven by environment variables with sen
 | 1. Single-GPU fine-tune | `01_finetune_singlegpu.py` | `GPU_1xA10` | Fine-tuning, MLflow tracking, UC registration + `@champion` |
 | 2. Multi-GPU fine-tune | `02_finetune_multigpu.py` | `GPU_8xH100` | 8-GPU **DDP** (notebook: `serverless_gpu`; CLI: `torchrun`) |
 | 3. GPU batch inference | `03_batch_inference.py` | `GPU_1xA10` | Loading the `@champion` UC model, batched GPU scoring, CSV to a UC Volume |
-| 4. Model Serving | `04_serve.py` | Serving (GPU) | Real-time endpoint from the registered model (control-plane) |
+| 4. Model Serving *(Optional)* | `04_serve.py` | Serving (GPU) | Real-time endpoint via **Databricks Model Serving** — a separate product from AI Runtime (control-plane) |
 
 ## What lands in the Databricks platform (both forms)
 
@@ -108,8 +109,9 @@ COPYFILE_DISABLE=1 air run --file 02_cli/finetune_multigpu.yaml --watch --profil
 # 3) GPU batch inference over the AG News test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile air
 
-# 4) Deploy a real-time GPU serving endpoint, then query it.
-#    04 is a control-plane script (not a GPU job), so run it locally — install its one dependency first:
+# 4) (Optional) Deploy a real-time GPU serving endpoint, then query it. This uses Databricks Model
+#    Serving (a separate product from AI Runtime). 04 is a control-plane script (not a GPU job), so
+#    run it locally — install its one dependency first:
 pip install -r requirements.txt          # or: pip install "mlflow>=2.15.0"
 DATABRICKS_CONFIG_PROFILE=air python 02_cli/04_serve.py
 ```
@@ -129,9 +131,9 @@ then **attach a serverless AI Runtime GPU** — there is no cluster to create:
    leave the default **Base environment**.
 4. Click **Apply**, then **Confirm**.
 
-Then **Run All** — each step cell runs and shows its output as you go. The `%pip` cells install
-dependencies automatically. Start with `01_finetune_singlegpu.py`, then `03_batch_inference.py`,
-then `04_serve.py`. See
+Then **run the cells one at a time, top to bottom**, reviewing each step's output (Run All works
+too). The `%pip` cells install dependencies automatically. Start with `01_finetune_singlegpu.py`,
+then `03_batch_inference.py`, then (optionally) `04_serve.py`. See
 [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 
 - **`02_finetune_multigpu.py` must be attached to a `GPU_8xH100` AI Runtime compute** — not a
@@ -173,7 +175,7 @@ Override per run by prefixing the YAML `command:` line, e.g.
 
 ```
 air-sample-bert/
-├── 01_notebook/               # Databricks notebooks — import + Run All
+├── 01_notebook/               # Databricks notebooks — import + step through
 │   ├── 01_finetune_singlegpu.py
 │   ├── 02_finetune_multigpu.py
 │   ├── 03_batch_inference.py
