@@ -71,6 +71,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh      # installs `uv` if you don'
 uv tool install --force databricks-air --python 3.12
 air --version
 
+# macOS only: `air run` packages the code snapshot with **GNU tar**. macOS's built-in
+# bsdtar rejects air's `--anchored` flag (error: "tar: Option --anchored is not
+# supported"), so install GNU tar and put it first on PATH:
+brew install gnu-tar
+export PATH="$(brew --prefix gnu-tar)/libexec/gnubin:$PATH"   # add to ~/.zshrc to persist
+
 # d) Create the Unity Catalog schema + volume this demo writes to (one time).
 #    Pick a catalog you can write to (e.g. `main`, or your own). Everything else is created for you.
 export CATALOG=main                                   # <-- change to YOUR catalog
@@ -169,6 +175,7 @@ Override per run by prefixing the YAML `command:` line, e.g.
 | Symptom | Cause & fix |
 |---------|-------------|
 | Job dies in seconds, `cd: .../._xxx: Not a directory` | macOS AppleDouble files in the snapshot — always run with `COPYFILE_DISABLE=1` (see above). |
+| `air run` → `tar: Option --anchored is not supported` (macOS) | Recent `air` versions package the snapshot with **GNU tar**, and macOS's built-in bsdtar lacks `--anchored`. Either `brew install gnu-tar` and prepend `$(brew --prefix gnu-tar)/libexec/gnubin` to `PATH` (Setup step c), **or run the CLI from Linux/WSL** (GNU tar is the default there). CLI-only — the notebook path is unaffected. |
 | `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
 | Job fails ~50s in with no logs | Usually a dependency-install issue — keep the pinned versions in the YAML; don't add heavy/unpinned packages. |
 | `04_serve.py` → `ModuleNotFoundError: No module named 'mlflow'` (local run) | Install deps first: `pip install -r requirements.txt`. (Not needed in notebook mode — the `%pip` cell handles it.) |
