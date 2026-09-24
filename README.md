@@ -80,6 +80,11 @@ databricks volumes create $CATALOG air_samples predictions MANAGED --profile air
 
 > Prefer one command? Run `CATALOG=main PROFILE=air ./setup.sh` (see [`setup.sh`](setup.sh)).
 
+> **This Setup is optional** — on first run the notebooks and CLI jobs **auto-create** the
+> schema + `predictions` volume if you have `CREATE` on the catalog. Run it (or grant CREATE)
+> only if the auto-create step reports a permission error.
+
+
 ## Point the demo at your catalog
 
 The scripts default to catalog **`main`**, schema **`air_samples`** — the same values the Setup
@@ -88,9 +93,9 @@ governed ones** — pick a catalog where you can create schemas/volumes/models. 
 
 - **Notebook (recommended):** use the **`UC_CATALOG` / `UC_SCHEMA` widgets** at the top of the
   notebook — no code edit, and it runs before anything else. Or
-- edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each script, or
-- prefix the YAML `command:` line, e.g.
-  `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/02_cli/01_finetune_singlegpu.py`.
+- **CLI (no file edit):** override the workload env var, e.g.
+  `air run --file 02_cli/finetune_singlegpu.yaml --override env_variables.UC_CATALOG=mycat --profile air`
+  (each `02_cli/*.yaml` declares `env_variables: UC_CATALOG/UC_SCHEMA`).
 
 Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
 

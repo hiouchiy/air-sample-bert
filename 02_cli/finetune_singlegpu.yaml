@@ -24,6 +24,12 @@ environment:
     # must be installed or Hub downloads (model/tokenizer/dataset) raise ValueError.
     - "hf_transfer"
 
+# UC target as workload env vars — override without editing files:
+#   air run ... --override env_variables.UC_CATALOG=<your-catalog>
+env_variables:
+  UC_CATALOG: main
+  UC_SCHEMA: air_samples
+
 compute:
   num_accelerators: 1
   accelerator_type: GPU_1xA10

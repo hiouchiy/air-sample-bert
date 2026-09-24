@@ -15,6 +15,12 @@ environment:
     - "datasets>=2.19,<4"   # <4: AIR CLI env ships an older huggingface_hub; datasets 4.x breaks it
     - "hf_transfer"
 
+# UC target as workload env vars — override without editing files:
+#   air run ... --override env_variables.UC_CATALOG=<your-catalog>
+env_variables:
+  UC_CATALOG: main
+  UC_SCHEMA: air_samples
+
 compute:
   num_accelerators: 1
   accelerator_type: GPU_1xA10

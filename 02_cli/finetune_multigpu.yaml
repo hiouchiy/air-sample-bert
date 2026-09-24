@@ -19,6 +19,12 @@ environment:
     - "accelerate>=0.30,<2"
     - "hf_transfer"
 
+# UC target as workload env vars — override without editing files:
+#   air run ... --override env_variables.UC_CATALOG=<your-catalog>
+env_variables:
+  UC_CATALOG: main
+  UC_SCHEMA: air_samples
+
 compute:
   num_accelerators: 8
   accelerator_type: GPU_8xH100
