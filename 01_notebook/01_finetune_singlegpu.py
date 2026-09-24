@@ -44,7 +44,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "transformers>=4.48,<5" "datasets>=2.19,<4" "accelerate>=0.30,<2" "hf_transfer"
+# MAGIC %pip install "transformers>=4.48" "datasets>=2.19" "accelerate>=0.30" "hf_transfer"
 
 # COMMAND ----------
 
@@ -66,11 +66,20 @@ import logging
 import os
 from dataclasses import dataclass
 
+
+def _logmodel_model_kw():
+    """Cross-version: MLflow >= 3 takes name=, MLflow 2.x (AIR CLI env) requires artifact_path=."""
+    import mlflow
+    return {"name": "model"} if int(mlflow.__version__.split(".")[0]) >= 3 else {"artifact_path": "model"}
+
 # Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
 # lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
 # logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
 # logger so it doesn't look like a failure.
 logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+# Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
+logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
+logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -337,7 +346,7 @@ def log_and_register(cfg: Config, trainer, tokenizer, metrics):
     )
     model_info = mlflow.transformers.log_model(
         transformers_model=clf,
-        artifact_path="model",
+        **_logmodel_model_kw(),
         task="text-classification",
         input_example=example,
         registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
@@ -354,7 +363,7 @@ def _promote_to_champion(cfg: Config, model_info):
     from mlflow.tracking import MlflowClient
 
     version = model_info.registered_model_version
-    client = MlflowClient(registry_uri="databricks-uc")
+    client = MlflowClient()
     client.set_registered_model_alias(cfg.uc_model_fqn, "champion", version)
     print(f"Registered {cfg.uc_model_fqn} as version {version} and set alias @champion "
           f"(this is the version 03/04 will load).")

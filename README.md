@@ -46,12 +46,12 @@ Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks
 
 ## Prerequisites
 
-- A **Databricks workspace where AI Runtime is enabled.** AI Runtime is currently available in
-  **US regions on AWS/Azure** (EU/APJ/GCP were not yet GA as of this writing) — confirm with your
-  Databricks contact if unsure.
+- A **Databricks workspace where AI Runtime is enabled** — see the
+  [AI Runtime documentation](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/) for
+  current cloud/region availability.
 - Permission to **create a Unity Catalog schema and volume** in some catalog (ask your admin which
   catalog you can write to, or use one you own).
-- macOS/Linux/WSL with a terminal. (Validated on a US-region AWS workspace with AI Runtime enabled.)
+- macOS/Linux/WSL with a terminal. (Validated on a workspace with AI Runtime enabled.)
 
 ## Setup — one time, ~10 minutes
 
@@ -66,7 +66,7 @@ databricks --version               # need v0.230+
 databricks auth login --host https://<workspace-url>.cloud.databricks.com --profile air
 databricks current-user me --profile air     # should print your email
 
-# c) Install the AI Runtime CLI (`air`); it reuses the Databricks profiles above
+# c) (CLI users only — SKIP if you'll run the 01_notebook/ notebooks) Install the AI Runtime CLI (`air`)
 curl -LsSf https://astral.sh/uv/install.sh | sh      # installs `uv` if you don't have it
 uv tool install --force databricks-air --python 3.12
 air --version
@@ -169,7 +169,7 @@ Override per run by prefixing the YAML `command:` line, e.g.
 | `02` notebook → `GPUTypeError: ... does not match the requested GPU type H100` | Attach the `02` notebook to a **`GPU_8xH100`** AI Runtime compute (see notebook notes). |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
 | Step 3/4 can't find the model | Run step 1 (or 2) first — it registers the model and sets the `@champion` alias that 03/04 load. |
-| Long "waiting for GPU capacity" | Normal for H100; retry later or use the A10 steps. AI Runtime is US-region only for now. |
+| Long "waiting for GPU capacity" | Normal for H100; retry later or use the A10 steps. |
 
 ## Repo layout
 

@@ -44,7 +44,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "mlflow>=2.15.0"
+# MAGIC %pip install "mlflow>=2.15.0"
 
 # COMMAND ----------
 
@@ -122,7 +122,7 @@ def latest_version(cfg: Config) -> str:
     mlflow.set_registry_uri("databricks-uc")
     from mlflow.tracking import MlflowClient
 
-    client = MlflowClient(registry_uri="databricks-uc")
+    client = MlflowClient()
     versions = client.search_model_versions(f"name='{cfg.uc_model_fqn}'")
     if not versions:
         raise RuntimeError(f"No versions found for {cfg.uc_model_fqn}. Run 01/02 first.")
@@ -149,11 +149,8 @@ def _served_config(cfg: Config, version: str) -> dict:
 
 
 def _endpoint_exists(client, name: str) -> bool:
-    try:
-        client.get_endpoint(name)
-        return True
-    except Exception:
-        return False
+    # Membership check instead of a broad try/except (which could mask auth/network errors).
+    return any(e.get("name") == name for e in (client.list_endpoints() or []))
 
 
 def _wait_ready(client, name: str, timeout_s: int = 2400):

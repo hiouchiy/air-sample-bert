@@ -18,7 +18,7 @@ environment:
   version: "4"
   dependencies:
     - "transformers>=4.48,<5"
-    - "datasets>=2.19,<4"
+    - "datasets>=2.19,<4"   # <4: AIR CLI env ships an older huggingface_hub; datasets 4.x breaks it
     - "accelerate>=0.30,<2"
     # AI Runtime presets HF_HUB_ENABLE_HF_TRANSFER=1, so this fast-download backend
     # must be installed or Hub downloads (model/tokenizer/dataset) raise ValueError.

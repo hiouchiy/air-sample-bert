@@ -37,7 +37,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "transformers>=4.48,<5" "datasets>=2.19,<4" "hf_transfer"
+# MAGIC %pip install "transformers>=4.48" "datasets>=2.19" "hf_transfer"
 
 # COMMAND ----------
 
@@ -69,6 +69,9 @@ from dataclasses import dataclass
 # logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
 # logger so it doesn't look like a failure.
 logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+# Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
+logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
+logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -122,12 +125,14 @@ def load_model(cfg: Config):
     uri = cfg.resolved_model_uri
     try:
         clf = mlflow.transformers.load_model(uri, device=device)
-    except Exception as exc:
+    except mlflow.exceptions.MlflowException as exc:
         print(f"Could not load {uri} ({exc}); falling back to latest version.")
         from mlflow.tracking import MlflowClient
 
-        client = MlflowClient(registry_uri="databricks-uc")
+        client = MlflowClient()
         versions = client.search_model_versions(f"name='{cfg.uc_model_fqn}'")
+        if not versions:
+            raise RuntimeError(f"No versions for {cfg.uc_model_fqn}; run 01/02 first.")
         latest = max(int(v.version) for v in versions)
         uri = f"models:/{cfg.uc_model_fqn}/{latest}"
         print(f"Loading {uri}")
@@ -202,7 +207,12 @@ with mlflow.start_run(run_name="modernbert-agnews-batch-inference", nested=neste
     mlflow.log_metric("inference_seconds", elapsed)
     mlflow.log_metric("rows_per_second", throughput)
     if labels is not None:
-        pred_ids = [LABELS.index(p["label"]) for p in preds]
+        label_to_id = {l: i for i, l in enumerate(LABELS)}
+        unknown = {p["label"] for p in preds if p["label"] not in label_to_id}
+        if unknown:
+            raise ValueError(f"Predicted labels not in LABELS {LABELS}: {unknown}. "
+                             "Check the model's id2label mapping.")
+        pred_ids = [label_to_id[p["label"]] for p in preds]
         acc = accuracy_score(labels, pred_ids)
         mlflow.log_metric("accuracy", acc)
         print(f"Batch inference accuracy: {acc:.4f}")

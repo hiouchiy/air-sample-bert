@@ -43,7 +43,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "transformers>=4.48,<5" "datasets>=2.19,<4" "accelerate>=0.30,<2" "hf_transfer"
+# MAGIC %pip install "transformers>=4.48" "datasets>=2.19" "accelerate>=0.30" "hf_transfer"
 
 # COMMAND ----------
 
@@ -62,6 +62,12 @@
 
 import os
 from dataclasses import dataclass
+
+
+def _logmodel_model_kw():
+    """Cross-version: MLflow >= 3 takes name=, MLflow 2.x (AIR CLI env) requires artifact_path=."""
+    import mlflow
+    return {"name": "model"} if int(mlflow.__version__.split(".")[0]) >= 3 else {"artifact_path": "model"}
 
 
 def _env(name: str, default: str) -> str:
@@ -258,6 +264,9 @@ def _train_impl():
 
         # Quiet the benign serverless py4j-whitelist warning MLflow logs while resolving tags.
         logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+        # Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging.
+        logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
+        logging.getLogger("py4j").setLevel(logging.ERROR)
         mlflow.set_registry_uri("databricks-uc")
         mlflow.start_run(run_name="modernbert-agnews-multigpu")
 
@@ -298,7 +307,7 @@ def _train_impl():
         )
         info = mlflow.transformers.log_model(
             transformers_model=clf,
-            artifact_path="model",
+            **_logmodel_model_kw(),
             task="text-classification",
             input_example=example,
             registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
@@ -308,7 +317,7 @@ def _train_impl():
             from mlflow.tracking import MlflowClient
 
             v = info.registered_model_version
-            MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
+            MlflowClient().set_registered_model_alias(
                 cfg.uc_model_fqn, "champion", v)
             log(f"registered {cfg.uc_model_fqn} version {v} and set alias @champion")
         mlflow.end_run()
