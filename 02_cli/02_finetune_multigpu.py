@@ -239,8 +239,11 @@ def _train_impl():
             except Exception:
                 pass
         mlflow.log_metric("train_seconds", train_secs)
+        # Log the final eval metrics under distinct `final_*` keys. Stripping the `eval_` prefix here
+        # would collide with the per-step training `loss` curve the MLflow callback already streamed
+        # (it would inject the eval loss as a stray `loss` point at step 0 and clutter the chart).
         mlflow.log_metrics(
-            {k.replace("eval_", ""): float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+            {f"final_{k.replace('eval_', '')}": float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
         )
         info = mlflow.transformers.log_model(
             transformers_model=clf,

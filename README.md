@@ -29,7 +29,7 @@ Both forms share the same logic and are driven by environment variables with sen
 | 1. Single-GPU fine-tune | `01_finetune_singlegpu.py` | `GPU_1xA10` | Fine-tuning, MLflow tracking, UC registration + `@champion` |
 | 2. Multi-GPU fine-tune | `02_finetune_multigpu.py` | `GPU_8xH100` | 8-GPU **DDP** (notebook: `serverless_gpu`; CLI: `torchrun`) |
 | 3. GPU batch inference | `03_batch_inference.py` | `GPU_1xA10` | Loading the `@champion` UC model, batched GPU scoring, CSV to a UC Volume |
-| 4. Model Serving *(Optional)* | `04_serve.py` | Serving (GPU) | Real-time endpoint via **Databricks Model Serving** — a separate product from AI Runtime (control-plane) |
+| 4. Model Serving *(Optional, notebook only)* | `04_serve.py` | Serving (GPU) | Real-time endpoint via **Databricks Model Serving** — a separate product from AI Runtime (control-plane) |
 
 ## What lands in the Databricks platform (both forms)
 
@@ -130,7 +130,8 @@ then `03_batch_inference.py`, then (optionally) `04_serve.py`. See
 
 ## Run it via the CLI (`02_cli/`) — do the steps in order
 
-Steps 3 and 4 need the model that step 1 (or 2) registers, so **run 01 first.**
+Step 3 needs the model that step 1 (or 2) registers, so **run 01 first.** (Model Serving, step 4, is
+a **notebook-only** step — see the notebook section below.)
 
 ```bash
 # macOS: the COPYFILE_DISABLE=1 prefix is REQUIRED — it keeps macOS ._* files out of the
@@ -144,17 +145,15 @@ COPYFILE_DISABLE=1 air run --file 02_cli/finetune_multigpu.yaml --watch --profil
 
 # 3) GPU batch inference over the AG News test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile air
-
-# 4) (Optional) Deploy a real-time GPU serving endpoint, then query it. This uses Databricks Model
-#    Serving (a separate product from AI Runtime). 04 is a control-plane script (not a GPU job), so
-#    run it locally — install its one dependency first:
-pip install -r requirements.txt          # or: pip install "mlflow>=2.15.0"
-DATABRICKS_CONFIG_PROFILE=air python 02_cli/04_serve.py
 ```
 
 Each `air run` ends with `Job status: SUCCESS` on success. The first run of each waits a few
 minutes for a GPU to be provisioned — that is normal. (Note: `air logs` sometimes prints
 "No logs available" even for successful runs; trust `Job status` and the MLflow links.)
+
+> **Model Serving (step 4) is notebook-only.** Deploying a real-time endpoint is a control-plane
+> step (not an AI Runtime GPU job), so it ships only as the `01_notebook/04_serve.py` notebook —
+> run that after step 1. There is no `02_cli/04_serve.py`.
 
 ## Configuration (env vars, with defaults)
 
@@ -178,7 +177,6 @@ Override per run by prefixing the YAML `command:` line, e.g.
 | `air run` → `tar: Option --anchored is not supported` (macOS) | Recent `air` versions package the snapshot with **GNU tar**, and macOS's built-in bsdtar lacks `--anchored`. Either `brew install gnu-tar` and prepend `$(brew --prefix gnu-tar)/libexec/gnubin` to `PATH` (Setup step c), **or run the CLI from Linux/WSL** (GNU tar is the default there). CLI-only — the notebook path is unaffected. |
 | `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
 | Job fails ~50s in with no logs | Usually a dependency-install issue — keep the pinned versions in the YAML; don't add heavy/unpinned packages. |
-| `04_serve.py` → `ModuleNotFoundError: No module named 'mlflow'` (local run) | Install deps first: `pip install -r requirements.txt`. (Not needed in notebook mode — the `%pip` cell handles it.) |
 | Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless. AI Runtime GPU nodes have no Spark; these lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore — 03 writes a CSV to the UC Volume. |
 | `02` notebook → `GPUTypeError: ... does not match the requested GPU type H100` | Attach the `02` notebook to a **`GPU_8xH100`** AI Runtime compute (see notebook notes). |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
@@ -193,9 +191,11 @@ air-sample-bert/
 │   ├── 01_finetune_singlegpu.py
 │   ├── 02_finetune_multigpu.py
 │   ├── 03_batch_inference.py
-│   └── 04_serve.py
+│   └── 04_serve.py            # (optional) Model Serving — notebook only
 ├── 02_cli/                    # AI Runtime CLI — plain scripts + workload YAMLs (air run)
-│   ├── 01_finetune_singlegpu.py … 04_serve.py
+│   ├── 01_finetune_singlegpu.py
+│   ├── 02_finetune_multigpu.py
+│   ├── 03_batch_inference.py
 │   ├── finetune_singlegpu.yaml
 │   ├── finetune_multigpu.yaml
 │   └── batch_inference.yaml
